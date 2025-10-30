@@ -1,0 +1,30 @@
+# Compiled artifacts and dependency sources
+/_build/
+/deps/
+/cover/
+/doc/
+/tmp/
+
+# Editor and tooling cruft
+.elixir_ls/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# BEAM build outputs and archives
+*.beam
+*.ez
+chrono_mesh-*.tar
+
+# Crash dumps and Dialyzer caches
+erl_crash.dump
+*.plt
+*.plt.hash
+plt/
+
+# Local developer configuration
+.env
+.tool-versions
