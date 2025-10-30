@@ -179,7 +179,7 @@ defmodule ChronoMesh.Node do
   end
 
   @doc false
-  @spec schedule_wave(pos_integer()) :: :ok
+  @spec schedule_wave(pos_integer()) :: reference()
   defp schedule_wave(wave_duration) do
     now = System.os_time(:second)
     next_wave = current_wave(wave_duration) + 1

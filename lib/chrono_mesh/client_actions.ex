@@ -130,7 +130,7 @@ defmodule ChronoMesh.ClientActions do
   end
 
   @doc false
-  @spec build_tokens([map()], binary(), non_neg_integer()) :: {[binary()], binary()}
+  @spec build_tokens([map()], binary(), non_neg_integer()) :: {[binary()], binary() | nil}
   defp build_tokens(path, frame_id, shard_index) do
     path_info = Enum.map(path, &prepare_peer/1)
     last_index = length(path_info) - 1

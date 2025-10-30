@@ -5,6 +5,10 @@
 /doc/
 /tmp/
 
+# Project docs and personal task list (keep untracked)
+docs/
+TODO.md
+
 # Editor and tooling cruft
 .elixir_ls/
 .idea/
