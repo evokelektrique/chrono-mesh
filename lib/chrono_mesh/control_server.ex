@@ -71,7 +71,6 @@ defmodule ChronoMesh.ControlServer do
     {:noreply, state}
   end
 
-  @doc false
   @spec handle_client(port()) :: :ok
   defp handle_client(socket) do
     case :gen_tcp.recv(socket, 0) do
@@ -85,7 +84,6 @@ defmodule ChronoMesh.ControlServer do
     :gen_tcp.close(socket)
   end
 
-  @doc false
   @spec dispatch_payload(binary()) :: :ok
   defp dispatch_payload(binary) do
     case safe_decode(binary) do
@@ -98,15 +96,17 @@ defmodule ChronoMesh.ControlServer do
     end
   end
 
-  @doc false
   @spec safe_decode(binary()) :: {:ok, [ChronoMesh.Pulse.t()]} | {:error, term()}
   defp safe_decode(binary) do
     try do
-      case :erlang.binary_to_term(binary) do
+      case :erlang.binary_to_term(binary, [:safe]) do
         pulses when is_list(pulses) -> {:ok, pulses}
         other -> {:error, {:unexpected_payload, other}}
       end
     rescue
+      ArgumentError -> {:error, :unsafe_term}
+    catch
+      :error, :badarg -> {:error, :bad_term}
       error -> {:error, error}
     end
   end

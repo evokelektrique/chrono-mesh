@@ -10,6 +10,8 @@ defmodule ChronoMesh.ControlClient do
 
   alias ChronoMesh.Pulse
 
+  @connection_registry :chrono_mesh_connections
+
   @doc """
   Enqueues pulses on the locally configured node via TCP control port.
   """
@@ -20,14 +22,16 @@ defmodule ChronoMesh.ControlClient do
   end
 
   @doc """
-  Enqueues pulses on a remote node identified by host and port.
+  Enqueues pulses on a remote node identified by node_id.
+
+  Resolves node_id to a connection endpoint and maintains a connection pool
+  keyed by node_id for efficient routing.
   """
-  @spec enqueue_remote(String.t(), non_neg_integer(), [Pulse.t()]) :: :ok | {:error, String.t()}
-  def enqueue_remote(host, port, pulses) when is_list(pulses) do
-    send_to(host, port, pulses)
+  @spec enqueue_remote(binary(), [Pulse.t()]) :: :ok | {:error, String.t()}
+  def enqueue_remote(node_id, pulses) when is_binary(node_id) and is_list(pulses) do
+    send_to_node(node_id, pulses)
   end
 
-  @doc false
   @spec control_endpoint(map()) :: {String.t(), non_neg_integer()}
   defp control_endpoint(config) do
     network = config["network"] || %{}
@@ -36,7 +40,6 @@ defmodule ChronoMesh.ControlClient do
     {host, port}
   end
 
-  @doc false
   @spec parse_port(integer() | String.t() | nil) :: non_neg_integer()
   defp parse_port(port) when is_integer(port) and port > 0, do: port
 
@@ -49,17 +52,185 @@ defmodule ChronoMesh.ControlClient do
 
   defp parse_port(_), do: 4_000
 
-  @doc false
+  @doc """
+  Registers a connection endpoint for a node_id.
+
+  This allows manual registration of connection endpoints for bootstrap nodes
+  or nodes discovered through out-of-band mechanisms.
+
+  Note: For full anonymity, connections should be established through
+  introduction points or rendezvous mechanisms. This direct registration
+  is for bootstrap/manual setup only.
+  """
+  @spec register_connection(binary(), String.t(), pos_integer()) :: :ok
+  def register_connection(node_id, host, port)
+      when is_binary(node_id) and byte_size(node_id) == 32 and is_binary(host) and
+             is_integer(port) do
+    ensure_registry()
+    :ets.insert(@connection_registry, {node_id, {host, port}})
+    :ok
+  end
+
+  @doc """
+  Unregisters a connection endpoint for a node_id.
+  """
+  @spec unregister_connection(binary()) :: :ok
+  def unregister_connection(node_id) when is_binary(node_id) do
+    ensure_registry()
+    :ets.delete(@connection_registry, node_id)
+    :ok
+  end
+
+  @spec send_to_node(binary(), [Pulse.t()]) :: :ok | {:error, String.t()}
+  defp send_to_node(node_id, pulses) do
+    result = resolve_connection(node_id)
+
+    case result do
+      {host, port} when is_binary(host) and is_integer(port) ->
+        send_to(host, port, pulses)
+
+      _ ->
+        Logger.error("Control client: unable to resolve node_id #{Base.encode16(node_id)}")
+        {:error, "Unable to resolve node_id for connection"}
+    end
+  end
+
+  @spec resolve_connection(binary()) :: {String.t(), pos_integer()} | nil
+  defp resolve_connection(node_id) do
+    ensure_registry()
+
+    case :ets.lookup(@connection_registry, node_id) do
+      [{^node_id, {host, port}}] ->
+        {host, port}
+
+      _ ->
+        resolve_connection_recursive(node_id, 0)
+    end
+  end
+
+  @spec resolve_connection_recursive(binary(), non_neg_integer()) ::
+          {String.t(), pos_integer()} | nil
+  defp resolve_connection_recursive(node_id, depth) when depth >= 5 do
+    Logger.warning(
+      "Control client: max recursion depth reached resolving node_id #{Base.encode16(node_id)}"
+    )
+
+    nil
+  end
+
+  defp resolve_connection_recursive(node_id, _depth)
+       when not is_binary(node_id) or byte_size(node_id) != 32 do
+    Logger.warning(
+      "Control client: invalid node_id size #{if is_binary(node_id), do: byte_size(node_id), else: :not_binary}"
+    )
+
+    nil
+  end
+
+  defp resolve_connection_recursive(node_id, depth) do
+    ensure_registry()
+
+    case :ets.lookup(@connection_registry, node_id) do
+      [{^node_id, {host, port}}] ->
+        {host, port}
+
+      _ ->
+        case GenServer.whereis(ChronoMesh.Discovery) do
+          nil ->
+            nil
+
+          discovery_pid ->
+            try do
+              case GenServer.call(discovery_pid, {:lookup_peer_dht, node_id}, 5_000) do
+                [announcement | _] when is_map(announcement) ->
+                  introduction_points = Map.get(announcement, :introduction_points, [])
+
+                  if introduction_points == [] do
+                    nil
+                  else
+                    try_introduction_points_recursive(introduction_points, node_id, depth + 1)
+                  end
+
+                _ ->
+                  nil
+              end
+            catch
+              :exit, {:timeout, _} ->
+                Logger.warning("Control client: timeout looking up node_id in DHT")
+                nil
+
+              _, _ ->
+                nil
+            end
+        end
+    end
+  end
+
+  @spec try_introduction_points_recursive([map()], binary(), non_neg_integer()) ::
+          {String.t(), pos_integer()} | nil
+  defp try_introduction_points_recursive([], _target_node_id, _depth), do: nil
+
+  defp try_introduction_points_recursive([intro_point | rest], target_node_id, depth) do
+    intro_node_id = Map.get(intro_point, :node_id)
+
+    if intro_node_id == target_node_id do
+      Logger.warning("Control client: detected circular introduction point reference")
+      try_introduction_points_recursive(rest, target_node_id, depth)
+    else
+      if is_binary(intro_node_id) and byte_size(intro_node_id) == 32 do
+        case resolve_connection_recursive(intro_node_id, depth) do
+          {host, port} when is_binary(host) and is_integer(port) and port > 0 ->
+            {host, port}
+
+          _ ->
+            try_introduction_points_recursive(rest, target_node_id, depth)
+        end
+      else
+        Logger.warning("Control client: invalid introduction point node_id")
+        try_introduction_points_recursive(rest, target_node_id, depth)
+      end
+    end
+  end
+
+  @spec ensure_registry() :: :ok
+  defp ensure_registry do
+    case :ets.whereis(@connection_registry) do
+      :undefined ->
+        :ets.new(@connection_registry, [:set, :public, :named_table])
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
   @spec send_to(String.t(), non_neg_integer(), [Pulse.t()]) :: :ok | {:error, String.t()}
   defp send_to(host, port, pulses) do
     host_chars = String.to_charlist(host)
     payload = :erlang.term_to_binary(pulses)
 
-    case :gen_tcp.connect(host_chars, port, [:binary, packet: 4]) do
+    # Set connection timeout (5 seconds)
+    timeout = 5_000
+
+    case :gen_tcp.connect(host_chars, port, [:binary, packet: 4, active: false], timeout) do
       {:ok, socket} ->
-        :ok = :gen_tcp.send(socket, payload)
+        # Set send timeout
+        :ok = :inet.setopts(socket, send_timeout: timeout)
+        result = :gen_tcp.send(socket, payload)
         :ok = :gen_tcp.close(socket)
-        :ok
+
+        case result do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error("Control client failed to send to #{host}:#{port} -> #{inspect(reason)}")
+            {:error, "Unable to send to node #{host}:#{port} (#{inspect(reason)})"}
+        end
+
+      {:error, :timeout} ->
+        Logger.error("Control client connection timeout to #{host}:#{port}")
+        {:error, "Connection timeout to node #{host}:#{port}"}
 
       {:error, reason} ->
         Logger.error("Control client failed to connect to #{host}:#{port} -> #{inspect(reason)}")

@@ -6,7 +6,8 @@ defmodule ChronoMesh.TokenTest do
   test "encrypt_token/4 and decrypt_token/4 round-trip instructions" do
     {peer_public, peer_private} = Keys.generate()
     frame_id = :crypto.strong_rand_bytes(16)
-    instruction = %{instruction: :forward, host: "relay", port: 4_001}
+    node_id = Keys.node_id_from_public_key(peer_public)
+    instruction = %{instruction: :forward, node_id: node_id}
 
     {:ok, {token, shared_secret}} =
       Token.encrypt_token(instruction, peer_public, frame_id, 0)

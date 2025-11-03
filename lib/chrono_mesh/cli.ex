@@ -12,7 +12,7 @@ defmodule ChronoMesh.CLI do
     init                         Initialise configuration and keypair
     identity show                Display identity information
     peers list                   Show known peers
-    peers add --name N --address HOST:PORT --public-key PATH [--note TEXT]
+    peers add --name N --public-key PATH [--node-id HEX] [--note TEXT]
     start [--mode MODE]          Start local services (MODE: client | server | combined)
     help                         Show this message
   """
@@ -92,10 +92,30 @@ defmodule ChronoMesh.CLI do
       IO.puts("No peers configured. Use `chrono_mesh peers add ...`.")
     else
       Enum.each(peers, fn peer ->
+        node_id_str =
+          case peer["node_id"] do
+            nil ->
+              if peer["public_key"] do
+                # Derive from public_key
+                try do
+                  pubkey = ChronoMesh.Keys.read_public_key!(peer["public_key"])
+                  node_id = ChronoMesh.Keys.node_id_from_public_key(pubkey)
+                  Base.encode16(node_id, case: :lower)
+                rescue
+                  _ -> "N/A (requires public_key)"
+                end
+              else
+                "N/A"
+              end
+
+            node_id_hex ->
+              node_id_hex
+          end
+
         IO.puts("""
         - #{peer["name"]}
-            address: #{peer["address"]}
-            public_key: #{peer["public_key"]}
+            node_id: #{node_id_str}
+            public_key: #{peer["public_key"] || "N/A"}
             note: #{peer["note"] || "-"}
         """)
       end)
@@ -105,7 +125,7 @@ defmodule ChronoMesh.CLI do
   defp handle_peers_add(config, argv) do
     {opts, _argv, invalid} =
       OptionParser.parse(argv,
-        strict: [name: :string, address: :string, public_key: :string, note: :string]
+        strict: [name: :string, public_key: :string, node_id: :string, note: :string]
       )
 
     if invalid != [] do
@@ -114,21 +134,24 @@ defmodule ChronoMesh.CLI do
     end
 
     with {:ok, name} <- fetch_required(opts, :name),
-         {:ok, address} <- fetch_required(opts, :address),
          {:ok, public_key} <- fetch_required(opts, :public_key) do
+      peer =
+        %{
+          "name" => name,
+          "public_key" => public_key,
+          "note" => opts[:note]
+        }
+        |> then(fn p ->
+          if opts[:node_id] do
+            Map.put(p, "node_id", opts[:node_id])
+          else
+            p
+          end
+        end)
+
       updated_config =
         config
-        |> Map.update("peers", [], fn peers ->
-          peers ++
-            [
-              %{
-                "name" => name,
-                "address" => address,
-                "public_key" => public_key,
-                "note" => opts[:note]
-              }
-            ]
-        end)
+        |> Map.update("peers", [], fn peers -> peers ++ [peer] end)
 
       Config.write!(updated_config)
       IO.puts("Added peer #{name}.")

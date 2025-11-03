@@ -13,7 +13,22 @@ defmodule ChronoMesh.Config do
     "default_path_length" => 3,
     "pulse_size_bytes" => 1024,
     "listen_port" => 4_000,
-    "listen_host" => "127.0.0.1"
+    "listen_host" => "127.0.0.1",
+    "aead_enabled" => false
+  }
+
+  @default_address_book %{
+    "subscriptions" => %{
+      "enabled" => true,
+      "max_count" => 100,
+      "refresh_interval_ms" => :timer.minutes(30),
+      "ttl_ms" => :timer.hours(1),
+      "rate_limit_ms" => :timer.minutes(1)
+    },
+    "aliases" => %{
+      "publish_ttl_ms" => :timer.hours(24),
+      "publish_rate_limit_ms" => :timer.minutes(1)
+    }
   }
 
   @doc """
@@ -81,6 +96,8 @@ defmodule ChronoMesh.Config do
       |> Map.put("listen_port", default_listen_port())
       |> Map.put("listen_host", default_listen_host())
 
+    address_book_defaults = ensure_address_book_defaults(%{})
+
     %{
       "identity" => %{
         "display_name" => identity_filename,
@@ -88,6 +105,7 @@ defmodule ChronoMesh.Config do
         "public_key_path" => public_key_path
       },
       "network" => network_defaults,
+      "address_book" => address_book_defaults,
       "peers" => []
     }
   end
@@ -117,12 +135,14 @@ defmodule ChronoMesh.Config do
   defp normalise(%{"peers" => peers} = config) when is_list(peers) do
     config
     |> ensure_network_defaults()
+    |> ensure_address_book_defaults()
   end
 
   defp normalise(config) when is_map(config) do
     config
     |> Map.put_new("peers", [])
     |> ensure_network_defaults()
+    |> ensure_address_book_defaults()
   end
 
   defp ensure_network_defaults(config) do
@@ -134,14 +154,53 @@ defmodule ChronoMesh.Config do
       |> Map.put_new("pulse_size_bytes", @default_network["pulse_size_bytes"])
       |> Map.put_new("listen_port", default_listen_port())
       |> Map.put_new("listen_host", default_listen_host())
+      |> Map.put_new("aead_enabled", @default_network["aead_enabled"])
 
     Map.put(config, "network", network)
+  end
+
+  defp ensure_address_book_defaults(config) do
+    address_book =
+      config
+      |> Map.get("address_book", %{})
+      |> Map.put_new("subscriptions", %{})
+      |> Map.put_new("aliases", %{})
+      |> then(fn ab ->
+        subscriptions =
+          ab
+          |> Map.get("subscriptions", %{})
+          |> Map.put_new("enabled", @default_address_book["subscriptions"]["enabled"])
+          |> Map.put_new("max_count", @default_address_book["subscriptions"]["max_count"])
+          |> Map.put_new(
+            "refresh_interval_ms",
+            @default_address_book["subscriptions"]["refresh_interval_ms"]
+          )
+          |> Map.put_new("ttl_ms", @default_address_book["subscriptions"]["ttl_ms"])
+          |> Map.put_new(
+            "rate_limit_ms",
+            @default_address_book["subscriptions"]["rate_limit_ms"]
+          )
+
+        aliases =
+          ab
+          |> Map.get("aliases", %{})
+          |> Map.put_new("publish_ttl_ms", @default_address_book["aliases"]["publish_ttl_ms"])
+          |> Map.put_new(
+            "publish_rate_limit_ms",
+            @default_address_book["aliases"]["publish_rate_limit_ms"]
+          )
+
+        %{ab | "subscriptions" => subscriptions, "aliases" => aliases}
+      end)
+
+    Map.put(config, "address_book", address_book)
   end
 
   defp encode_yaml(%{} = config) do
     [
       encode_section("identity", config["identity"]),
       encode_section("network", config["network"]),
+      encode_section("address_book", config["address_book"]),
       encode_peers(config["peers"] || [])
     ]
     |> Enum.reject(&(&1 == ""))
@@ -151,13 +210,49 @@ defmodule ChronoMesh.Config do
   defp encode_section(_name, nil), do: ""
 
   defp encode_section(name, map) when is_map(map) do
+    # Special handling for address_book nested sections
+    if name == "address_book" do
+      encode_address_book_section(map)
+    else
+      [
+        "#{name}:",
+        Enum.map(map, fn {k, v} -> "  #{k}: #{yaml_value(v)}" end)
+      ]
+      |> List.flatten()
+      |> Enum.join("\n")
+    end
+  end
+
+  defp encode_address_book_section(map) do
     [
-      "#{name}:",
-      Enum.map(map, fn {k, v} -> "  #{k}: #{yaml_value(v)}" end)
+      "address_book:",
+      if Map.has_key?(map, "subscriptions") do
+        [
+          "  subscriptions:",
+          encode_nested_section(map["subscriptions"], "    ")
+        ]
+      else
+        []
+      end,
+      if Map.has_key?(map, "aliases") do
+        [
+          "  aliases:",
+          encode_nested_section(map["aliases"], "    ")
+        ]
+      else
+        []
+      end
     ]
     |> List.flatten()
+    |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
+
+  defp encode_nested_section(map, indent) when is_map(map) do
+    Enum.map(map, fn {k, v} -> "#{indent}#{k}: #{yaml_value(v)}" end)
+  end
+
+  defp encode_nested_section(_, _), do: []
 
   defp encode_peers([]), do: "peers: []"
 
@@ -166,14 +261,20 @@ defmodule ChronoMesh.Config do
 
     body =
       Enum.map(peers, fn peer ->
-        [
-          "  - name: #{yaml_value(peer["name"])}",
-          "    address: #{yaml_value(peer["address"])}",
-          "    public_key: #{yaml_value(peer["public_key"])}",
-          if(peer["note"], do: "    note: #{yaml_value(peer["note"])}", else: nil)
-        ]
-        |> Enum.reject(&is_nil/1)
-        |> Enum.join("\n")
+        lines =
+          [
+            "  - name: #{yaml_value(peer["name"])}",
+            if(peer["node_id"], do: "    node_id: #{yaml_value(peer["node_id"])}", else: nil),
+            if(peer["public_key"],
+              do: "    public_key: #{yaml_value(peer["public_key"])}",
+              else: nil
+            ),
+            if(peer["note"], do: "    note: #{yaml_value(peer["note"])}", else: nil)
+          ]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join("\n")
+
+        lines
       end)
       |> Enum.join("\n")
 
@@ -227,12 +328,36 @@ defmodule ChronoMesh.Config do
           if new_section == "peers" do
             {Map.put_new(acc, "peers", []), []}
           else
-            {Map.put_new(acc, new_section, %{}), peers}
+            # Check if this is a nested section (e.g., "subscriptions:" under "address_book")
+            if section == "address_book" and new_section in ["subscriptions", "aliases"] do
+              # Nested section under address_book
+              current_value = Map.get(acc, section, %{})
+              updated_value = Map.put_new(current_value, new_section, %{})
+              {Map.put(acc, section, updated_value), peers}
+            else
+              {Map.put_new(acc, new_section, %{}), peers}
+            end
           end
 
         parse_lines(rest, acc, new_section, nil, peers)
 
       section in ["identity", "network"] && String.starts_with?(line, "  ") ->
+        {key, value} = parse_kv(trimmed)
+        updated = Map.update!(acc, section, &Map.put(&1, key, value))
+        parse_lines(rest, updated, section, current_peer, peers)
+
+      section in ["subscriptions", "aliases"] && String.starts_with?(line, "    ") ->
+        # Nested section under address_book (4 spaces for nested keys)
+        {key, value} = parse_kv(trimmed)
+        address_book = Map.get(acc, "address_book", %{})
+        nested_value = Map.get(address_book, section, %{})
+        updated_nested = Map.put(nested_value, key, value)
+        updated_address_book = Map.put(address_book, section, updated_nested)
+        updated = Map.put(acc, "address_book", updated_address_book)
+        parse_lines(rest, updated, section, current_peer, peers)
+
+      section == "address_book" && String.starts_with?(line, "  ") ->
+        # Top-level address_book keys (subscriptions, aliases)
         {key, value} = parse_kv(trimmed)
         updated = Map.update!(acc, section, &Map.put(&1, key, value))
         parse_lines(rest, updated, section, current_peer, peers)
@@ -277,6 +402,7 @@ defmodule ChronoMesh.Config do
         value
     end
   end
+
 
   defp base_dir do
     System.get_env("CHRONO_MESH_HOME") || System.user_home!()

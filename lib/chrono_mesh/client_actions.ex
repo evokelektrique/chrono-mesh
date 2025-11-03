@@ -4,12 +4,38 @@ defmodule ChronoMesh.ClientActions do
 
   Enqueues pulses on the local node for forwarding across the network.
   Payload is encoded as UTF-8 and fragmented into shards.
+
+  ## Forward Error Correction (FEC)
+
+  Supports optional Forward Error Correction (FEC) for improved reliability:
+  - When FEC is enabled, parity shards are generated from data shards
+  - Parity shards allow recovery from lost data shards without retransmission
+  - FEC can be enabled via configuration: `fec.enabled: true`
+  - Parity ratio can be configured: `fec.parity_ratio: 0.25` (default: 1 parity per 4 data shards)
+  - Minimum parity shards: `fec.min_parity_shards: 1` (default: 1)
+
+  See `ChronoMesh.FEC` for details on FEC implementation.
+
+  ## Path Failure Protocol (PFP)
+
+  The module tracks failed paths and handles failure notices from intermediate nodes.
+  When a path failure is detected, the failure is logged and can be used for path
+  rerouting in future message sends.
+
+  See `ChronoMesh.PFP` for details on path failure detection and handling.
   """
 
-  alias ChronoMesh.{Pulse, Token, Keys}
+  alias ChronoMesh.{AddressBook, FEC, Pulse, Token, Keys}
+
+  @failed_paths_table :chrono_mesh_failed_paths
 
   @doc """
   Queues a human-readable `message` for delivery to `recipient_name`.
+
+  The recipient can be specified as:
+  - An alias (e.g., `"alice.mesh"`) - will be resolved via AddressBook
+  - A hex-encoded node_id (e.g., `"A1B2C3..."`) - will be decoded
+  - A peer name from config - will use config peer
 
   Options:
 
@@ -22,30 +48,100 @@ defmodule ChronoMesh.ClientActions do
 
     path_length = opts[:path_length] || default_path_length(config)
 
-    with {:ok, recipient} <- find_peer(peers, recipient_name),
+    with {:ok, recipient} <- resolve_recipient(peers, recipient_name),
          {:ok, path} <- build_path(peers, recipient, path_length) do
       frame_id = :crypto.strong_rand_bytes(16)
 
+      # Check if FEC is enabled
+      fec_enabled = fec_enabled?(config)
+      parity_ratio = fec_parity_ratio(config)
+      min_parity_shards = fec_min_parity_shards(config)
+
+      # Check if AEAD is enabled
+      aead_enabled = aead_enabled?(config)
+
       shard_size = shard_payload_size(config)
       plaintext = IO.iodata_to_binary(message <> "\n")
-      chunks = chunk_binary(plaintext, shard_size)
-      shard_count = max(length(chunks), 1)
+      data_chunks = chunk_binary(plaintext, shard_size)
+      data_shard_count = max(length(data_chunks), 1)
 
-      pulses =
-        Enum.with_index(chunks)
+      # Calculate FEC shard counts
+      {data_shard_count, parity_count, total_shard_count} =
+        if fec_enabled do
+          FEC.calculate_fec_shard_count(data_shard_count, parity_ratio, min_parity_shards)
+        else
+          {data_shard_count, 0, data_shard_count}
+        end
+
+      # Generate parity shards if FEC enabled
+      parity_chunks =
+        if fec_enabled and parity_count > 0 do
+          FEC.generate_parity_shards(data_chunks, parity_count)
+        else
+          []
+        end
+
+      # Create pulses for data shards
+      data_pulses =
+        Enum.with_index(data_chunks)
         |> Enum.map(fn {chunk, shard_index} ->
           {tokens, payload_secret} = build_tokens(path, frame_id, shard_index)
           payload_secret = payload_secret || raise "Failed to derive payload secret"
-          payload_ciphertext = Token.encrypt_payload(payload_secret, frame_id, shard_index, chunk)
+
+          # Use AEAD if enabled, otherwise standard encryption
+          {payload_ciphertext, auth_tag} =
+            if aead_enabled do
+              Token.encrypt_aead(payload_secret, frame_id, shard_index, chunk)
+            else
+              {Token.encrypt_payload(payload_secret, frame_id, shard_index, chunk), nil}
+            end
 
           %Pulse{
             frame_id: frame_id,
             shard_index: shard_index,
-            shard_count: shard_count,
+            shard_count: total_shard_count,
             token_chain: tokens,
-            payload: payload_ciphertext
+            payload: payload_ciphertext,
+            fec_enabled: fec_enabled,
+            parity_count: parity_count,
+            data_shard_count: data_shard_count,
+            aead_enabled: aead_enabled,
+            auth_tag: auth_tag
           }
         end)
+
+      # Create pulses for parity shards
+      parity_pulses =
+        Enum.with_index(parity_chunks)
+        |> Enum.map(fn {parity_chunk, parity_index} ->
+          shard_index = data_shard_count + parity_index
+          {tokens, payload_secret} = build_tokens(path, frame_id, shard_index)
+          payload_secret = payload_secret || raise "Failed to derive payload secret"
+
+          # Use AEAD if enabled, otherwise standard encryption
+          {payload_ciphertext, auth_tag} =
+            if aead_enabled do
+              Token.encrypt_aead(payload_secret, frame_id, shard_index, parity_chunk)
+            else
+              {Token.encrypt_payload(payload_secret, frame_id, shard_index, parity_chunk), nil}
+            end
+
+          %Pulse{
+            frame_id: frame_id,
+            shard_index: shard_index,
+            shard_count: total_shard_count,
+            token_chain: tokens,
+            payload: payload_ciphertext,
+            fec_enabled: fec_enabled,
+            parity_count: parity_count,
+            data_shard_count: data_shard_count,
+            aead_enabled: aead_enabled,
+            auth_tag: auth_tag
+          }
+        end)
+
+      # Combine all pulses
+      pulses = data_pulses ++ parity_pulses
 
       send_with_retry(config, pulses, 3)
     else
@@ -54,7 +150,49 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @doc false
+  @doc """
+  Handles a path failure notice.
+
+  Records the failed node and path for future path rerouting.
+  """
+  @spec handle_path_failure(binary(), binary()) :: :ok
+  def handle_path_failure(frame_id, failed_node_id)
+      when is_binary(frame_id) and byte_size(frame_id) == 16 and
+             is_binary(failed_node_id) and byte_size(failed_node_id) == 32 do
+    ensure_failed_paths_table()
+
+    # Record failed node for this frame
+    :ets.insert(@failed_paths_table, {frame_id, failed_node_id, System.system_time(:millisecond)})
+
+    :ok
+  end
+
+  @doc """
+  Gets a list of failed nodes for a given frame.
+
+  Returns a list of node IDs that failed during transmission of this frame.
+  """
+  @spec get_failed_nodes(binary()) :: [binary()]
+  def get_failed_nodes(frame_id) when is_binary(frame_id) and byte_size(frame_id) == 16 do
+    ensure_failed_paths_table()
+
+    @failed_paths_table
+    |> :ets.match({{frame_id, :_, :_}})
+    |> Enum.map(fn [{^frame_id, node_id, _timestamp}] -> node_id end)
+  end
+
+  @spec ensure_failed_paths_table() :: :ok
+  defp ensure_failed_paths_table do
+    case :ets.whereis(@failed_paths_table) do
+      :undefined ->
+        :ets.new(@failed_paths_table, [:set, :public, :named_table])
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
   @spec send_with_retry(map(), [Pulse.t()], pos_integer()) :: :ok | {:error, String.t()}
   defp send_with_retry(config, pulses, attempts_left) do
     case ChronoMesh.ControlClient.enqueue_local(config, pulses) do
@@ -70,7 +208,6 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @doc false
   @spec shard_payload_size(map()) :: pos_integer()
   defp shard_payload_size(config) do
     total = get_in(config, ["network", "pulse_size_bytes"]) || 1024
@@ -78,13 +215,11 @@ defmodule ChronoMesh.ClientActions do
     max(total - overhead, 1)
   end
 
-  @doc false
   @spec chunk_binary(binary(), pos_integer()) :: [binary()]
   defp chunk_binary(bin, size) when is_binary(bin) and size > 0 do
     do_chunk(bin, size, []) |> Enum.reverse()
   end
 
-  @doc false
   @spec do_chunk(binary(), pos_integer(), [binary()]) :: [binary()]
   defp do_chunk(<<>>, _size, acc), do: acc
 
@@ -93,7 +228,6 @@ defmodule ChronoMesh.ClientActions do
     do_chunk(rest, size, [part | acc])
   end
 
-  @doc false
   @spec split_binary(binary(), pos_integer()) :: {binary(), binary()}
   defp split_binary(bin, size) do
     if byte_size(bin) <= size do
@@ -104,7 +238,36 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @doc false
+  @spec resolve_recipient([map()], String.t()) :: {:ok, map()} | {:error, String.t()}
+  defp resolve_recipient(peers, identifier) do
+    cond do
+      # Check if it's an alias (ends with .mesh)
+      String.ends_with?(identifier, ".mesh") ->
+        case AddressBook.resolve(identifier) do
+          {:ok, node_id} ->
+            # Create peer map from alias resolution
+            {:ok, %{"node_id" => Base.encode16(node_id, case: :lower), "name" => identifier}}
+
+          :not_found ->
+            {:error, "Unknown alias #{identifier}. Use `AddressBook.register/4` to register."}
+        end
+
+      # Check if it's a hex-encoded node_id (64 hex chars = 32 bytes)
+      Regex.match?(~r/^[0-9a-fA-F]{64}$/, identifier) ->
+        try do
+          _node_id = Base.decode16!(identifier, case: :mixed)
+          {:ok, %{"node_id" => identifier, "name" => identifier}}
+        rescue
+          ArgumentError ->
+            {:error, "Invalid node_id format: #{identifier}"}
+        end
+
+      # Check if it's a config peer name
+      true ->
+        find_peer(peers, identifier)
+    end
+  end
+
   @spec find_peer([map()], String.t()) :: {:ok, map()} | {:error, String.t()}
   defp find_peer(peers, name) do
     case Enum.find(peers, &(&1["name"] == name)) do
@@ -113,7 +276,6 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @doc false
   @spec build_path([map()], map(), pos_integer()) :: {:ok, [map()]} | {:error, String.t()}
   defp build_path(peers, recipient, path_length) do
     other_peers =
@@ -129,7 +291,6 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @doc false
   @spec build_tokens([map()], binary(), non_neg_integer()) :: {[binary()], binary() | nil}
   defp build_tokens(path, frame_id, shard_index) do
     path_info = Enum.map(path, &prepare_peer/1)
@@ -141,7 +302,7 @@ defmodule ChronoMesh.ClientActions do
           %{instruction: :deliver}
         else
           next_peer = Enum.at(path_info, idx + 1)
-          %{instruction: :forward, host: next_peer.host, port: next_peer.port}
+          %{instruction: :forward, node_id: next_peer.node_id}
         end
 
       {token, shared} =
@@ -152,31 +313,33 @@ defmodule ChronoMesh.ClientActions do
     end)
   end
 
-  @doc false
-  @spec prepare_peer(map()) :: %{host: String.t(), port: pos_integer(), public_key: binary()}
+  @spec prepare_peer(map()) :: %{node_id: binary(), public_key: binary()}
   defp prepare_peer(peer) do
-    {host, port} = parse_address(peer["address"])
-    public_key = load_public_key(peer["public_key"])
+    # Get node_id from config (either directly or derive from public_key)
+    node_id =
+      case peer do
+        %{"node_id" => node_id_hex} ->
+          # Node ID provided as hex string
+          Base.decode16!(node_id_hex, case: :mixed)
 
-    %{host: host, port: port, public_key: public_key}
+        %{"public_key" => _} ->
+          # Derive node_id from public_key
+          public_key = load_public_key(peer["public_key"])
+          ChronoMesh.Keys.node_id_from_public_key(public_key)
+
+        _ ->
+          raise "Peer config must have either node_id or public_key"
+      end
+
+    public_key =
+      case peer do
+        %{"public_key" => pk} -> load_public_key(pk)
+        _ -> node_id
+      end
+
+    %{node_id: node_id, public_key: public_key}
   end
 
-  @doc false
-  @spec parse_address(String.t()) :: {String.t(), pos_integer()}
-  defp parse_address(address) do
-    case String.split(address, ":") do
-      [host, port_str] ->
-        case Integer.parse(port_str) do
-          {port, _} when port > 0 -> {host, port}
-          _ -> raise "Invalid peer address #{address}"
-        end
-
-      _ ->
-        raise "Invalid peer address format #{address}"
-    end
-  end
-
-  @doc false
   @spec load_public_key(String.t()) :: binary()
   defp load_public_key(path) do
     cond do
@@ -193,7 +356,6 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @doc false
   @spec default_path_length(map()) :: pos_integer()
   defp default_path_length(config) do
     config
@@ -210,6 +372,48 @@ defmodule ChronoMesh.ClientActions do
 
       _ ->
         2
+    end
+  end
+
+  @spec fec_enabled?(map()) :: boolean()
+  defp fec_enabled?(config) do
+    get_in(config, ["fec", "enabled"]) || false
+  end
+
+  @spec fec_parity_ratio(map()) :: float()
+  defp fec_parity_ratio(config) do
+    case get_in(config, ["fec", "parity_ratio"]) do
+      ratio when is_float(ratio) and ratio > 0.0 -> ratio
+      ratio when is_integer(ratio) and ratio > 0 -> ratio / 1.0
+      ratio when is_binary(ratio) ->
+        case Float.parse(ratio) do
+          {float, _} when float > 0.0 -> float
+          _ -> 0.25
+        end
+      _ -> 0.25
+    end
+  end
+
+  @spec fec_min_parity_shards(map()) :: pos_integer()
+  defp fec_min_parity_shards(config) do
+    case get_in(config, ["fec", "min_parity_shards"]) do
+      min when is_integer(min) and min > 0 -> min
+      min when is_binary(min) ->
+        case Integer.parse(min) do
+          {int, _} when int > 0 -> int
+          _ -> 1
+        end
+      _ -> 1
+    end
+  end
+
+  @spec aead_enabled?(map()) :: boolean()
+  defp aead_enabled?(config) do
+    case get_in(config, ["network", "aead_enabled"]) do
+      value when is_boolean(value) -> value
+      value when is_binary(value) ->
+        String.downcase(value) in ["true", "1", "yes"]
+      _ -> false
     end
   end
 end

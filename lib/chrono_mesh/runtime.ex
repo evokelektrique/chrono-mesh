@@ -34,19 +34,16 @@ defmodule ChronoMesh.Runtime do
     )
   end
 
-  @doc false
   @spec node_child(map()) :: Supervisor.child_spec()
   defp node_child(config) do
     Supervisor.child_spec({Node, config}, id: :node)
   end
 
-  @doc false
   @spec client_child(map()) :: Supervisor.child_spec()
   defp client_child(config) do
     Supervisor.child_spec({ChronoMesh.ClientShell, config}, id: :client_shell)
   end
 
-  @doc false
   @spec discovery_child(map()) :: Supervisor.child_spec()
   defp discovery_child(config) do
     Supervisor.child_spec({Discovery, config}, id: :discovery)

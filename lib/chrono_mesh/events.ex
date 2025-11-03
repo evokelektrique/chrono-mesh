@@ -19,7 +19,11 @@ defmodule ChronoMesh.Events do
   @type event_name ::
           :pulse_enqueued
           | :pulse_forwarded
+          | :pulse_delivered
           | :control_received
+          | :shard_received
+          | :frame_complete
+          | :frame_timeout
 
   @type handler_id :: {:chrono_mesh, event_name(), reference()} | {:noop, event_name()}
 
@@ -29,7 +33,10 @@ defmodule ChronoMesh.Events do
     pulse_enqueued: [:chrono_mesh, :pulse, :enqueued],
     pulse_forwarded: [:chrono_mesh, :pulse, :forwarded],
     pulse_delivered: [:chrono_mesh, :pulse, :delivered],
-    control_received: [:chrono_mesh, :control, :received]
+    control_received: [:chrono_mesh, :control, :received],
+    shard_received: [:chrono_mesh, :fdp, :shard_received],
+    frame_complete: [:chrono_mesh, :fdp, :frame_complete],
+    frame_timeout: [:chrono_mesh, :fdp, :frame_timeout]
   }
 
   @doc """
