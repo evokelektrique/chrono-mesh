@@ -293,6 +293,10 @@ defmodule ChronoMesh.Node do
           next_wave = base_wave + wave_multiplier
           entry = {updated_pulse, node_id}
 
+          Logger.debug(
+            "Node: Scheduling pulse for wave #{next_wave} (current: #{base_wave}, multiplier: #{wave_multiplier}, frame_id: #{Base.encode16(updated_pulse.frame_id)})"
+          )
+
           # Check if we should swap to disk (PDQ)
           updated_state =
             if state.pdq_pid != nil do
@@ -357,7 +361,9 @@ defmodule ChronoMesh.Node do
         end
 
       {:error, reason} ->
-        Logger.error("Dropping pulse due to #{inspect(reason)}")
+        Logger.error(
+          "Dropping pulse #{if is_binary(pulse.frame_id), do: Base.encode16(pulse.frame_id), else: "unknown"} due to #{inspect(reason)}"
+        )
         {:noreply, state}
     end
   end

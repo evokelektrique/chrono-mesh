@@ -53,8 +53,9 @@ defmodule ChronoMesh.ClientActions do
 
     path_length = opts[:path_length] || default_path_length(config)
 
-    with {:ok, recipient} <- resolve_recipient(peers, recipient_name),
-         {:ok, path} <- build_path(peers, recipient, path_length) do
+    with {:ok, sender} <- get_sender_peer(config),
+         {:ok, recipient} <- resolve_recipient(peers, recipient_name),
+         {:ok, path} <- build_path_with_sender(peers, recipient, path_length, sender) do
       frame_id = :crypto.strong_rand_bytes(16)
 
       # Generate dialogue_id and sequence_number if ordered delivery is enabled
@@ -478,6 +479,40 @@ defmodule ChronoMesh.ClientActions do
 
       _ ->
         1
+    end
+  end
+
+  @spec get_sender_peer(map()) :: {:ok, map()} | {:error, String.t()}
+  defp get_sender_peer(config) do
+    # Get sender's public key path from identity config
+    public_key_path = get_in(config, ["identity", "public_key_path"])
+
+    if public_key_path do
+      {:ok, %{"public_key" => public_key_path, "name" => "self"}}
+    else
+      {:error, "Unable to get sender's public key from config"}
+    end
+  end
+
+  @spec build_path_with_sender([map()], map(), pos_integer(), map()) ::
+          {:ok, [map()]} | {:error, String.t()}
+  defp build_path_with_sender(peers, recipient, path_length, sender) do
+    # Always start with the sender as the first hop
+    other_peers =
+      peers
+      |> Enum.reject(&(&1 == recipient))
+
+    # For path_length, include sender + intermediates + recipient
+    # So intermediates count should be path_length - 2 (excluding sender and recipient)
+    intermediates_needed = max(path_length - 2, 0)
+
+    if length(other_peers) < intermediates_needed do
+      {:error,
+       "Not enough peers to build a path of length #{path_length} (need #{intermediates_needed} intermediates, have #{length(other_peers)})"}
+    else
+      shuffled = Enum.shuffle(other_peers)
+      intermediates = Enum.take(shuffled, intermediates_needed)
+      {:ok, [sender | intermediates ++ [recipient]]}
     end
   end
 end

@@ -806,4 +806,16 @@ defmodule ChronoMesh.Config do
       _ -> false
     end
   end
+
+  @doc """
+  Returns whether trust policy is enabled in the configuration.
+  """
+  @spec trust_policy_enabled?(map()) :: boolean()
+  def trust_policy_enabled?(config) do
+    case get_in(config, ["trust_policy", "enabled"]) do
+      value when is_boolean(value) -> value
+      value when value in ["true", "1", 1] -> true
+      _ -> false
+    end
+  end
 end
