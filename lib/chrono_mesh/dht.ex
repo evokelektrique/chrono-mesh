@@ -21,7 +21,7 @@ defmodule ChronoMesh.DHT do
   - **Replay Protection**: Each announcement includes a unique 16-byte nonce. Duplicate nonces are rejected.
   - **Timestamp Validation**: Clock skew tolerance of ±5 minutes prevents replay of old announcements.
   - **Nonce Tracking**: Tracks seen nonces per node_id (last 100) with automatic cleanup.
-  - **Signature Verification**: Announcements are cryptographically signed (currently HMAC-SHA256, Ed25519 support planned).
+  - **Signature Verification**: Announcements are cryptographically signed using Ed25519.
 
   ## Usage
 
@@ -73,7 +73,6 @@ defmodule ChronoMesh.DHT do
   ## Future Work
 
   - Real network I/O (currently in-VM only via ETS registry)
-  - Ed25519 signatures for proper public-key verification (currently HMAC-SHA256)
   - Trust policy integration
   - Parallel queries with proper α concurrency
   - See `docs/02_core_network/05_node_discovery_dht.md` for planned enhancements
@@ -122,7 +121,7 @@ defmodule ChronoMesh.DHT do
           signature: binary(),
           introduction_points: [introduction_point()],
           nonce: binary(),
-          ed25519_public_key: binary() | nil
+          ed25519_public_key: binary()
         }
 
   @typedoc "DHT state"
@@ -204,8 +203,7 @@ defmodule ChronoMesh.DHT do
   The announcement includes: node_id, public_key, timestamp, signature, and optional introduction_points.
   It expires after `ttl_ms` (default 5 minutes).
 
-  If Ed25519 keys are provided, they will be used for signing (proper public-key signatures).
-  Otherwise, HMAC-SHA256 is used (requires private key to verify).
+  Ed25519 keys are required for signing (proper public-key signatures).
 
   No IP addresses are stored in the announcement itself - nodes are identified solely by cryptographic identifiers.
   Introduction points provide anonymous connection establishment via rendezvous nodes.
@@ -331,11 +329,17 @@ defmodule ChronoMesh.DHT do
   end
 
   def handle_call(
-        {:announce_node, public_key, private_key, ttl_ms, introduction_points,
+        {:announce_node, public_key, _private_key, ttl_ms, introduction_points,
          ed25519_public_key, ed25519_private_key},
         _from,
         state
       ) do
+    unless ed25519_public_key != nil and ed25519_private_key != nil and
+             is_binary(ed25519_public_key) and byte_size(ed25519_public_key) == 32 and
+             is_binary(ed25519_private_key) and byte_size(ed25519_private_key) == 32 do
+      raise ArgumentError, "ed25519_public_key and ed25519_private_key must be 32-byte binaries"
+    end
+
     node_id = ChronoMesh.Keys.node_id_from_public_key(public_key)
     now = now_ms()
     expires_at = now + ttl_ms
@@ -357,22 +361,7 @@ defmodule ChronoMesh.DHT do
         ed25519_public_key
       )
 
-    # Use Ed25519 if available, otherwise fall back to HMAC-SHA256
-    {signature, ed25519_pub} =
-      if ed25519_public_key != nil and ed25519_private_key != nil do
-        try do
-          sig = ChronoMesh.Keys.ed25519_sign(announcement_data, ed25519_private_key)
-          {sig, ed25519_public_key}
-        rescue
-          _ ->
-            # Fallback to HMAC if Ed25519 fails
-            sig = ChronoMesh.Keys.sign(announcement_data, private_key)
-            {sig, nil}
-        end
-      else
-        sig = ChronoMesh.Keys.sign(announcement_data, private_key)
-        {sig, nil}
-      end
+    signature = ChronoMesh.Keys.sign(announcement_data, ed25519_private_key)
 
     announcement = %{
       node_id: node_id,
@@ -382,7 +371,7 @@ defmodule ChronoMesh.DHT do
       signature: signature,
       introduction_points: safe_intro_points,
       nonce: nonce,
-      ed25519_public_key: ed25519_pub
+      ed25519_public_key: ed25519_public_key
     }
 
     # Store announcement in DHT using node_id as key
@@ -716,32 +705,20 @@ defmodule ChronoMesh.DHT do
           announcement.expires_at,
           announcement.introduction_points || [],
           announcement.nonce,
-          Map.get(announcement, :ed25519_public_key)
+          announcement.ed25519_public_key
         )
 
-      # Use Ed25519 verification if ed25519_public_key is present, otherwise fall back to HMAC
-      if Map.has_key?(announcement, :ed25519_public_key) and
-           announcement.ed25519_public_key != nil and
-           byte_size(announcement.ed25519_public_key) == 32 do
-        # Ed25519 verification (proper public-key signature)
-        try do
-          ChronoMesh.Keys.ed25519_verify(
-            announcement_data,
-            announcement.signature,
-            announcement.ed25519_public_key
-          )
-        rescue
-          _ -> false
-        catch
-          _ -> false
-        end
-      else
-        # HMAC-SHA256 verification (basic structure check)
-        ChronoMesh.Keys.verify_public(
+      # Ed25519 verification
+      try do
+        ChronoMesh.Keys.verify(
           announcement_data,
           announcement.signature,
-          announcement.public_key
+          announcement.ed25519_public_key
         )
+      rescue
+        _ -> false
+      catch
+        _ -> false
       end
     end
   end
@@ -822,28 +799,17 @@ defmodule ChronoMesh.DHT do
         introduction_points: introduction_points,
         nonce: nonce
       } = announcement ->
-        # Check if ed25519_public_key is present (optional field)
-        ed25519_pub = Map.get(announcement, :ed25519_public_key)
-
-        # Validate signature size based on type
-        # Ed25519 signatures are 64 bytes, HMAC-SHA256 are 32 bytes
-        valid_signature_size =
-          if ed25519_pub != nil and byte_size(ed25519_pub) == 32 do
-            # Ed25519 signature
-            byte_size(signature) == 64
-          else
-            # HMAC-SHA256 signature
-            byte_size(signature) == 32
-          end
-
+        # Ed25519 signatures are 64 bytes
         if is_binary(node_id) and byte_size(node_id) == 32 and
              is_binary(public_key) and byte_size(public_key) == 32 and
              is_integer(timestamp) and timestamp > 0 and
              is_integer(expires_at) and expires_at > timestamp and
-             is_binary(signature) and valid_signature_size and
+             is_binary(signature) and byte_size(signature) == 64 and
              is_list(introduction_points) and length(introduction_points) <= 10 and
              is_binary(nonce) and byte_size(nonce) == 16 and
-             (ed25519_pub == nil or (is_binary(ed25519_pub) and byte_size(ed25519_pub) == 32)) do
+             Map.has_key?(announcement, :ed25519_public_key) and
+             is_binary(announcement.ed25519_public_key) and
+             byte_size(announcement.ed25519_public_key) == 32 do
           Enum.all?(introduction_points, &valid_introduction_point?/1)
         else
           false

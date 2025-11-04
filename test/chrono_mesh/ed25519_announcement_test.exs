@@ -17,7 +17,7 @@ defmodule ChronoMesh.Ed25519AnnouncementTest do
         {x25519_public_key, x25519_private_key} = Keys.generate()
 
         # Generate Ed25519 keys (for signatures)
-        {ed25519_public_key, ed25519_private_key} = Keys.ed25519_keypair()
+        {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
         # Announce with Ed25519 keys
         opts = [
@@ -63,72 +63,13 @@ defmodule ChronoMesh.Ed25519AnnouncementTest do
       end
     end
 
-    test "announcements without Ed25519 keys use HMAC-SHA256" do
-      {:ok, dht_pid} = DHT.start_link([])
-
-      {x25519_public_key, x25519_private_key} = Keys.generate()
-
-      # Announce without Ed25519 keys (should use HMAC-SHA256)
-      :ok =
-        DHT.announce_node(
-          dht_pid,
-          x25519_public_key,
-          x25519_private_key,
-          :timer.minutes(5),
-          []
-        )
-
-      Process.sleep(50)
-
-      # Lookup announcement
-      node_id = Keys.node_id_from_public_key(x25519_public_key)
-      announcements = DHT.lookup_nodes(dht_pid, node_id, 1)
-
-      assert length(announcements) > 0
-      announcement = List.first(announcements)
-
-      # Should not have Ed25519 public key (or it should be nil)
-      ed25519_pub = Map.get(announcement, :ed25519_public_key)
-      assert ed25519_pub == nil or byte_size(ed25519_pub) == 0
-
-      # Signature should be 32 bytes (HMAC-SHA256)
-      assert byte_size(announcement.signature) == 32
-
-      Process.exit(dht_pid, :normal)
-    end
-
-    test "backward compatibility: old announcements without ed25519_public_key still work" do
-      {:ok, dht_pid} = DHT.start_link([])
-
-      {x25519_public_key, x25519_private_key} = Keys.generate()
-
-      # Announce without Ed25519 (backward compatibility)
-      :ok =
-        DHT.announce_node(
-          dht_pid,
-          x25519_public_key,
-          x25519_private_key,
-          :timer.minutes(5),
-          []
-        )
-
-      Process.sleep(50)
-
-      node_id = Keys.node_id_from_public_key(x25519_public_key)
-      announcements = DHT.lookup_nodes(dht_pid, node_id, 1)
-
-      # Should still work (HMAC-SHA256)
-      assert length(announcements) > 0
-
-      Process.exit(dht_pid, :normal)
-    end
 
     test "Ed25519 signatures are properly verified" do
       try do
         {:ok, dht_pid} = DHT.start_link([])
 
         {x25519_public_key, x25519_private_key} = Keys.generate()
-        {ed25519_public_key, ed25519_private_key} = Keys.ed25519_keypair()
+        {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
         opts = [
           ed25519_private_key: ed25519_private_key,

@@ -29,19 +29,23 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
 
     # Create test keys
     {public_key, private_key} = Keys.generate()
+    {_ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
     # Write temporary keys for Node to read
     tmp_dir = System.tmp_dir!()
     private_key_path = Path.join(tmp_dir, "test_sk.pem")
     public_key_path = Path.join(tmp_dir, "test_pk.pem")
+    ed25519_private_key_path = Path.join(tmp_dir, "test_ed25519_sk.pem")
 
     Keys.write_private_key!(private_key_path, private_key)
     Keys.write_public_key!(public_key_path, public_key)
+    Keys.write_private_key!(ed25519_private_key_path, ed25519_private_key)
 
     config = %{
       "identity" => %{
         "private_key_path" => private_key_path,
-        "public_key_path" => public_key_path
+        "public_key_path" => public_key_path,
+        "ed25519_private_key_path" => ed25519_private_key_path
       },
       "network" => %{
         "wave_duration_secs" => 10,
@@ -58,6 +62,7 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
     on_exit(fn ->
       File.rm_rf(private_key_path)
       File.rm_rf(public_key_path)
+      File.rm_rf(ed25519_private_key_path)
     end)
 
     %{config: config, public_key: public_key, private_key: private_key}

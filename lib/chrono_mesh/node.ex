@@ -28,6 +28,7 @@ defmodule ChronoMesh.Node do
           listen_port: non_neg_integer(),
           local_address: String.t(),
           private_key: binary(),
+          ed25519_private_key: binary(),
           fdp_pid: pid() | nil,
           active_paths: %{optional(binary()) => [binary()]}
         }
@@ -98,6 +99,20 @@ defmodule ChronoMesh.Node do
         |> get_in(["identity", "private_key_path"])
         |> Keys.read_private_key!()
 
+      # Load Ed25519 keys (required for signatures)
+      ed25519_private_key_path = get_in(config, ["identity", "ed25519_private_key_path"])
+
+      unless ed25519_private_key_path != nil and is_binary(ed25519_private_key_path) do
+        raise ArgumentError,
+              "ed25519_private_key_path must be configured in config[\"identity\"][\"ed25519_private_key_path\"]"
+      end
+
+      ed25519_private_key = Keys.read_private_key!(ed25519_private_key_path)
+
+      unless is_binary(ed25519_private_key) and byte_size(ed25519_private_key) == 32 do
+        raise ArgumentError, "ed25519_private_key must be a 32-byte binary"
+      end
+
       {:ok,
        %{
          wave_duration: wave_duration,
@@ -107,6 +122,7 @@ defmodule ChronoMesh.Node do
          listen_host: listen_host,
          local_address: local_address,
          private_key: private_key,
+         ed25519_private_key: ed25519_private_key,
          fdp_pid: fdp_pid,
          active_paths: %{}
        }}
@@ -191,7 +207,15 @@ defmodule ChronoMesh.Node do
 
         # Detect path failure after max retries
         path = Map.get(state.active_paths, pulse.frame_id, [])
-        failure_notice = ChronoMesh.PFP.detect_failure(pulse.frame_id, node_id, :timeout, state.private_key)
+
+        failure_notice =
+          ChronoMesh.PFP.detect_failure(
+            pulse.frame_id,
+            node_id,
+            :timeout,
+            state.private_key,
+            ed25519_private_key: state.ed25519_private_key
+          )
 
         # Send failure notice upstream
         ChronoMesh.PFP.send_failure_notice(failure_notice, path, state.config)
@@ -225,7 +249,15 @@ defmodule ChronoMesh.Node do
 
         # Detect path failure
         path = Map.get(state.active_paths, pulse.frame_id, [])
-        failure_notice = ChronoMesh.PFP.detect_failure(pulse.frame_id, node_id, :connection_error, state.private_key)
+
+        failure_notice =
+          ChronoMesh.PFP.detect_failure(
+            pulse.frame_id,
+            node_id,
+            :connection_error,
+            state.private_key,
+            ed25519_private_key: state.ed25519_private_key
+          )
 
         # Send failure notice upstream
         ChronoMesh.PFP.send_failure_notice(failure_notice, path, state.config)

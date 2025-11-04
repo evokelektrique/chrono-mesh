@@ -3,6 +3,29 @@ defmodule ChronoMesh.DiscoveryTest do
 
   alias ChronoMesh.{Discovery, Keys}
 
+  defp create_ed25519_keys do
+    {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+    tmp_dir = System.tmp_dir!()
+    ed25519_priv_path = Path.join(tmp_dir, "test_ed25519_#{:rand.uniform(1_000_000)}.key")
+    ed25519_pub_path = Path.join(tmp_dir, "test_ed25519_pub_#{:rand.uniform(1_000_000)}.key")
+
+    Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+    Keys.write_public_key!(ed25519_pub_path, ed25519_public_key)
+
+    {ed25519_priv_path, ed25519_pub_path}
+  end
+
+  defp add_ed25519_keys(config) do
+    {ed25519_priv_path, ed25519_pub_path} = create_ed25519_keys()
+
+    identity = Map.get(config, "identity", %{})
+    identity = Map.put(identity, "ed25519_private_key_path", ed25519_priv_path)
+    identity = Map.put(identity, "ed25519_public_key_path", ed25519_pub_path)
+
+    config = Map.put(config, "identity", identity)
+    {config, ed25519_priv_path, ed25519_pub_path}
+  end
+
   setup do
     # Clean up any existing registry
     try do
@@ -26,10 +49,12 @@ defmodule ChronoMesh.DiscoveryTest do
 
   describe "start_link/1 and initialization" do
     test "starts discovery with empty config" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
       assert Process.alive?(pid)
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "starts discovery with network config" do
@@ -41,27 +66,38 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
+
       {:ok, pid} = Discovery.start_link(config)
       assert Process.alive?(pid)
 
       # Should have DHT node started
       assert is_pid(pid)
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "starts discovery with identity config" do
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       priv_path = Path.join(System.tmp_dir!(), "test_priv.key")
       pub_path = Path.join(System.tmp_dir!(), "test_pub.key")
+      ed25519_priv_path = Path.join(System.tmp_dir!(), "test_ed25519_priv.key")
+      ed25519_pub_path = Path.join(System.tmp_dir!(), "test_ed25519_pub.key")
 
       try do
         Keys.write_private_key!(priv_path, private_key)
         Keys.write_public_key!(pub_path, public_key)
+        Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+        Keys.write_public_key!(ed25519_pub_path, ed25519_public_key)
 
         config = %{
           "identity" => %{
             "private_key_path" => priv_path,
-            "public_key_path" => pub_path
+            "public_key_path" => pub_path,
+            "ed25519_private_key_path" => ed25519_priv_path,
+            "ed25519_public_key_path" => ed25519_pub_path
           },
           "network" => %{
             "listen_host" => "127.0.0.1",
@@ -75,6 +111,8 @@ defmodule ChronoMesh.DiscoveryTest do
       after
         File.rm(priv_path)
         File.rm(pub_path)
+        File.rm(ed25519_priv_path)
+        File.rm(ed25519_pub_path)
       end
     end
 
@@ -91,6 +129,8 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
+
       {:ok, pid} = Discovery.start_link(config)
 
       # Bootstrap peers should be in local cache
@@ -99,12 +139,14 @@ defmodule ChronoMesh.DiscoveryTest do
       assert length(peers) >= 0
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 
   describe "peer management" do
     test "upsert_peer/1 registers peers" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk = :crypto.strong_rand_bytes(32)
@@ -115,10 +157,12 @@ defmodule ChronoMesh.DiscoveryTest do
       assert Enum.any?(peers, fn p -> p.node_id == node_id end)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "list_peers/0 returns all known peers" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk1 = :crypto.strong_rand_bytes(32)
@@ -137,10 +181,12 @@ defmodule ChronoMesh.DiscoveryTest do
       assert Enum.any?(peers, fn p -> p.node_id == node_id2 end)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "upsert_peer/1 updates existing peer" do
-      config = %{}
+      {config, _ed25519_priv_path, _ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk = :crypto.strong_rand_bytes(32)
@@ -162,7 +208,7 @@ defmodule ChronoMesh.DiscoveryTest do
 
   describe "random_sample/1" do
     test "returns peers from local cache when available" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       # Add multiple peers
@@ -179,10 +225,12 @@ defmodule ChronoMesh.DiscoveryTest do
              end)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "falls back to local cache when DHT unavailable" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk = :crypto.strong_rand_bytes(32)
@@ -208,10 +256,13 @@ defmodule ChronoMesh.DiscoveryTest do
           # Table may be cleaned up, that's OK
           :ok
       end
+
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "uses DHT when local cache is insufficient" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       # Add only 1 peer locally
@@ -225,12 +276,14 @@ defmodule ChronoMesh.DiscoveryTest do
       assert length(sample) >= 1
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 
   describe "lookup_peer/1" do
     test "lookup_peer returns :not_found for unknown peer" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       unknown_pk = :crypto.strong_rand_bytes(32)
@@ -240,10 +293,12 @@ defmodule ChronoMesh.DiscoveryTest do
       assert result == :not_found or match?({:ok, _}, result)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "lookup_peer finds peer from local cache" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk = :crypto.strong_rand_bytes(32)
@@ -263,10 +318,12 @@ defmodule ChronoMesh.DiscoveryTest do
       end
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "lookup_peer queries DHT when not in cache" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       unknown_pk = :crypto.strong_rand_bytes(32)
@@ -276,10 +333,12 @@ defmodule ChronoMesh.DiscoveryTest do
       assert result == :not_found or match?({:ok, _}, result)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "lookup_peer resolves alias via AddressBook" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       {public_key, private_key} = Keys.generate()
@@ -292,12 +351,14 @@ defmodule ChronoMesh.DiscoveryTest do
       assert {:ok, ^node_id} = Discovery.lookup_peer("test-alias.mesh")
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 
   describe "lookup_peer_by_public_key/1" do
     test "lookup_peer_by_public_key returns empty list for unknown peer" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       unknown_pk = :crypto.strong_rand_bytes(32)
@@ -307,10 +368,12 @@ defmodule ChronoMesh.DiscoveryTest do
       assert is_list(result)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "lookup_peer_by_public_key finds peer from local cache" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk = :crypto.strong_rand_bytes(32)
@@ -325,23 +388,32 @@ defmodule ChronoMesh.DiscoveryTest do
       end
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 
   describe "DHT integration" do
     test "publishes self to DHT when identity is available" do
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       priv_path = Path.join(System.tmp_dir!(), "test_priv_announce.key")
       pub_path = Path.join(System.tmp_dir!(), "test_pub_announce.key")
+      ed25519_priv_path = Path.join(System.tmp_dir!(), "test_ed25519_priv_announce.key")
+      ed25519_pub_path = Path.join(System.tmp_dir!(), "test_ed25519_pub_announce.key")
 
       try do
         Keys.write_private_key!(priv_path, private_key)
         Keys.write_public_key!(pub_path, public_key)
+        Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+        Keys.write_public_key!(ed25519_pub_path, ed25519_public_key)
 
         config = %{
           "identity" => %{
             "private_key_path" => priv_path,
-            "public_key_path" => pub_path
+            "public_key_path" => pub_path,
+            "ed25519_private_key_path" => ed25519_priv_path,
+            "ed25519_public_key_path" => ed25519_pub_path
           },
           "network" => %{
             "listen_host" => "127.0.0.1",
@@ -372,6 +444,8 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
+
       {:ok, pid} = Discovery.start_link(config)
       assert Process.alive?(pid)
 
@@ -379,6 +453,8 @@ defmodule ChronoMesh.DiscoveryTest do
       assert is_list(Discovery.list_peers())
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "bootstrap_peers are added to local cache" do
@@ -393,6 +469,8 @@ defmodule ChronoMesh.DiscoveryTest do
           ]
         }
       }
+
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
 
       {:ok, pid} = Discovery.start_link(config)
 
@@ -409,23 +487,32 @@ defmodule ChronoMesh.DiscoveryTest do
       end)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 
   describe "announcement refresh" do
     test "schedules periodic announcement refresh" do
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       priv_path = Path.join(System.tmp_dir!(), "test_priv_refresh.key")
       pub_path = Path.join(System.tmp_dir!(), "test_pub_refresh.key")
+      ed25519_priv_path = Path.join(System.tmp_dir!(), "test_ed25519_priv_refresh.key")
+      ed25519_pub_path = Path.join(System.tmp_dir!(), "test_ed25519_pub_refresh.key")
 
       try do
         Keys.write_private_key!(priv_path, private_key)
         Keys.write_public_key!(pub_path, public_key)
+        Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+        Keys.write_public_key!(ed25519_pub_path, ed25519_public_key)
 
         config = %{
           "identity" => %{
             "private_key_path" => priv_path,
-            "public_key_path" => pub_path
+            "public_key_path" => pub_path,
+            "ed25519_private_key_path" => ed25519_priv_path,
+            "ed25519_public_key_path" => ed25519_pub_path
           },
           "network" => %{
             "listen_host" => "127.0.0.1",
@@ -445,6 +532,8 @@ defmodule ChronoMesh.DiscoveryTest do
       after
         File.rm(priv_path)
         File.rm(pub_path)
+        File.rm(ed25519_priv_path)
+        File.rm(ed25519_pub_path)
       end
     end
   end
@@ -460,28 +549,36 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
+
       {:ok, pid} = Discovery.start_link(config)
 
       # Should not crash on invalid peers
       assert Process.alive?(pid)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "handles missing network config" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
 
       {:ok, pid} = Discovery.start_link(config)
       assert Process.alive?(pid)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "handles missing identity paths gracefully" do
       config = %{
         "identity" => %{
           "private_key_path" => "/nonexistent/priv.key",
-          "public_key_path" => "/nonexistent/pub.key"
+          "public_key_path" => "/nonexistent/pub.key",
+          "ed25519_private_key_path" => "/nonexistent/ed25519_priv.key",
+          "ed25519_public_key_path" => "/nonexistent/ed25519_pub.key"
         },
         "network" => %{
           "listen_host" => "127.0.0.1",
@@ -489,12 +586,26 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
-      {:ok, pid} = Discovery.start_link(config)
+      # Should fail since Ed25519 keys are now required and file doesn't exist
+      # The error is raised in GenServer.init, causing the process to exit
+      # We link to catch the exit signal
+      Process.flag(:trap_exit, true)
 
-      # Should not crash, just skip announcement
-      assert Process.alive?(pid)
+      case Discovery.start_link(config) do
+        {:ok, pid} ->
+          # Wait for the process to exit due to File.Error in init
+          receive do
+            {:EXIT, ^pid, {:shutdown, {File.Error, _}}} -> :ok
+            {:EXIT, ^pid, reason} -> flunk("Unexpected exit reason: #{inspect(reason)}")
+          after
+            100 -> flunk("Expected process to exit due to File.Error")
+          end
 
-      Process.exit(pid, :normal)
+        {:error, _} = error ->
+          error
+      end
+
+      Process.flag(:trap_exit, false)
     end
 
     test "handles empty bootstrap_peers list" do
@@ -504,10 +615,14 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
+
       {:ok, pid} = Discovery.start_link(config)
       assert Process.alive?(pid)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "handles invalid public key encoding" do
@@ -519,18 +634,22 @@ defmodule ChronoMesh.DiscoveryTest do
         }
       }
 
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(config)
+
       {:ok, pid} = Discovery.start_link(config)
 
       # Should handle gracefully
       assert Process.alive?(pid)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 
   describe "peer structure validation" do
     test "peers have required fields" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       pk = :crypto.strong_rand_bytes(32)
@@ -545,10 +664,12 @@ defmodule ChronoMesh.DiscoveryTest do
       assert is_integer(peer.ts)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
 
     test "random_sample returns valid peer structures" do
-      config = %{}
+      {config, ed25519_priv_path, ed25519_pub_path} = add_ed25519_keys(%{})
       {:ok, pid} = Discovery.start_link(config)
 
       for _i <- 1..3 do
@@ -568,6 +689,8 @@ defmodule ChronoMesh.DiscoveryTest do
       end)
 
       Process.exit(pid, :normal)
+      File.rm(ed25519_priv_path)
+      File.rm(ed25519_pub_path)
     end
   end
 end

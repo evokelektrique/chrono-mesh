@@ -24,18 +24,41 @@ defmodule ChronoMeshTest do
   end
 
   test "node schedules and dispatches pulses on next wave" do
+    tmp_dir = System.tmp_dir!()
+    {_ed25519_public_key, ed25519_private_key} = ChronoMesh.Keys.keypair()
+    ed25519_priv_path = Path.join(tmp_dir, "dummy_ed25519_sk")
+
+    ChronoMesh.Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+
     config = %{
       "network" => %{
         "wave_duration_secs" => 1,
         "listen_port" => 4050,
         "listen_host" => "127.0.0.1"
       },
-      "identity" => %{"private_key_path" => System.tmp_dir!() <> "/dummy_sk"}
+      "identity" => %{
+        "private_key_path" => System.tmp_dir!() <> "/dummy_sk",
+        "ed25519_private_key_path" => ed25519_priv_path
+      }
     }
 
     File.write!(config["identity"]["private_key_path"], Base.encode64(<<0::256>>))
 
-    {:ok, _} = ChronoMesh.Node.start_link(config)
+    # Ensure node is stopped from previous test
+    if pid = Process.whereis(ChronoMesh.Node), do: GenServer.stop(pid)
+    if pid = Process.whereis(ChronoMesh.ControlServer), do: GenServer.stop(pid)
+    Process.sleep(100)
+
+    case ChronoMesh.Node.start_link(config) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:already_started, existing_pid}} ->
+        # Clean up and try again
+        GenServer.stop(existing_pid)
+        Process.sleep(100)
+        {:ok, _} = ChronoMesh.Node.start_link(config)
+    end
 
     assert %{} = :sys.get_state(ChronoMesh.Node)
   after

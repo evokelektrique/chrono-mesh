@@ -155,6 +155,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
   describe "publish_subscription_list/5" do
     test "publishes subscription list to DHT", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       {target_pub, _target_priv} = Keys.generate()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
       target_node_id = Keys.node_id_from_public_key(target_pub)
@@ -164,7 +165,15 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
       # Announce subscriber to DHT (required for signature verification)
       :ok =
-        DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
 
       Process.sleep(50)
 
@@ -173,8 +182,8 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
                dht_pid,
                subscriber_node_id,
                subscriber_priv,
-               nil,
-               nil
+               ed25519_priv,
+               ed25519_pub
              ) == :ok
 
       # Verify subscription list was published to DHT
@@ -185,7 +194,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
           subscription_list = :erlang.binary_to_term(value, [:safe])
           assert subscription_list.subscriber_node_id == subscriber_node_id
           assert target_node_id in subscription_list.subscribed_nodes
-          assert byte_size(subscription_list.signature) == 32
+          assert byte_size(subscription_list.signature) == 64
 
         _ ->
           flunk("Subscription list not found in DHT")
@@ -194,7 +203,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "publishes subscription list with Ed25519 signature", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
-      {ed25519_pub, ed25519_priv} = Keys.ed25519_keypair()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       {target_pub, _target_priv} = Keys.generate()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
       target_node_id = Keys.node_id_from_public_key(target_pub)
@@ -241,6 +250,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "enforces rate limiting (max 1 per minute)", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       {target_pub, _target_priv} = Keys.generate()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
       target_node_id = Keys.node_id_from_public_key(target_pub)
@@ -248,7 +258,15 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
       AddressBook.subscribe(subscriber_node_id, subscriber_pub, target_node_id)
 
       :ok =
-        DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
 
       Process.sleep(50)
 
@@ -257,8 +275,8 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
                dht_pid,
                subscriber_node_id,
                subscriber_priv,
-               nil,
-               nil
+               ed25519_priv,
+               ed25519_pub
              ) == :ok
 
       # Second publish immediately should fail
@@ -266,21 +284,22 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
                dht_pid,
                subscriber_node_id,
                subscriber_priv,
-               nil,
-               nil
+               ed25519_priv,
+               ed25519_pub
              ) == {:error, :rate_limit_exceeded}
     end
 
     test "returns :no_subscriptions when no subscriptions exist", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
 
       assert AddressBook.publish_subscription_list(
                dht_pid,
                subscriber_node_id,
                subscriber_priv,
-               nil,
-               nil
+               ed25519_priv,
+               ed25519_pub
              ) == {:error, :no_subscriptions}
     end
   end
@@ -288,6 +307,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
   describe "verify_subscription_list/2" do
     test "verifies valid subscription list signature", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       {target_pub, _target_priv} = Keys.generate()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
       target_node_id = Keys.node_id_from_public_key(target_pub)
@@ -295,7 +315,15 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
       AddressBook.subscribe(subscriber_node_id, subscriber_pub, target_node_id)
 
       :ok =
-        DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
 
       Process.sleep(50)
 
@@ -304,8 +332,8 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
           dht_pid,
           subscriber_node_id,
           subscriber_priv,
-          nil,
-          nil
+          ed25519_priv,
+          ed25519_pub
         )
 
       # Retrieve and verify
@@ -323,6 +351,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "rejects forged subscription list (invalid signature size)", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       {target_pub, _target_priv} = Keys.generate()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
       target_node_id = Keys.node_id_from_public_key(target_pub)
@@ -330,7 +359,15 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
       AddressBook.subscribe(subscriber_node_id, subscriber_pub, target_node_id)
 
       :ok =
-        DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
 
       Process.sleep(50)
 
@@ -340,13 +377,11 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
         subscribed_nodes: [target_node_id],
         timestamp: :erlang.system_time(:millisecond),
         expires_at: :erlang.system_time(:millisecond) + :timer.hours(1),
-        signature: <<0::size(16)>>, # Invalid size (should be 32)
-        ed25519_public_key: nil
+        signature: <<0::size(16)>>, # Invalid size (should be 64 for Ed25519)
+        ed25519_public_key: ed25519_pub
       }
 
       # Should reject invalid signature size
-      # Note: HMAC verification only checks size, not actual signature validity
-      # For proper verification, Ed25519 should be used
       assert AddressBook.verify_subscription_list(dht_pid, forged_sub_list) == false
     end
   end
@@ -354,18 +389,34 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
   describe "publish_alias/6" do
     test "publishes alias to DHT", %{dht_pid: dht_pid} do
       {owner_pub, owner_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       owner_node_id = Keys.node_id_from_public_key(owner_pub)
 
       # Register alias locally
       AddressBook.register("alice", owner_node_id, owner_pub, owner_priv)
 
       # Announce owner to DHT
-      :ok = DHT.announce_node(dht_pid, owner_pub, owner_priv, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          owner_pub,
+          owner_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
       Process.sleep(50)
 
       # Publish alias
-      assert AddressBook.publish_alias(dht_pid, "alice", owner_node_id, owner_priv, nil, nil) ==
-               :ok
+      assert AddressBook.publish_alias(
+               dht_pid,
+               "alice",
+               owner_node_id,
+               owner_priv,
+               ed25519_priv,
+               ed25519_pub
+             ) == :ok
 
       # Verify alias was published to DHT
       key = "alias:alice.mesh:" <> owner_node_id
@@ -375,7 +426,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
           published_alias = :erlang.binary_to_term(value, [:safe])
           assert published_alias.alias == "alice.mesh"
           assert published_alias.node_id == owner_node_id
-          assert byte_size(published_alias.signature) == 32
+          assert byte_size(published_alias.signature) == 64
 
         _ ->
           flunk("Published alias not found in DHT")
@@ -384,7 +435,7 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "publishes alias with Ed25519 signature", %{dht_pid: dht_pid} do
       {owner_pub, owner_priv} = Keys.generate()
-      {ed25519_pub, ed25519_priv} = Keys.ed25519_keypair()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       owner_node_id = Keys.node_id_from_public_key(owner_pub)
 
       AddressBook.register("alice", owner_node_id, owner_pub, owner_priv)
@@ -427,42 +478,89 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "enforces rate limiting for alias publishing", %{dht_pid: dht_pid} do
       {owner_pub, owner_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       owner_node_id = Keys.node_id_from_public_key(owner_pub)
 
       AddressBook.register("alice", owner_node_id, owner_pub, owner_priv)
 
-      :ok = DHT.announce_node(dht_pid, owner_pub, owner_priv, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          owner_pub,
+          owner_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
       Process.sleep(50)
 
       # First publish should succeed
-      assert AddressBook.publish_alias(dht_pid, "alice", owner_node_id, owner_priv, nil, nil) ==
-               :ok
+      assert AddressBook.publish_alias(
+               dht_pid,
+               "alice",
+               owner_node_id,
+               owner_priv,
+               ed25519_priv,
+               ed25519_pub
+             ) == :ok
 
       # Second publish immediately should fail
-      assert AddressBook.publish_alias(dht_pid, "alice", owner_node_id, owner_priv, nil, nil) ==
-               {:error, :rate_limit_exceeded}
+      assert AddressBook.publish_alias(
+               dht_pid,
+               "alice",
+               owner_node_id,
+               owner_priv,
+               ed25519_priv,
+               ed25519_pub
+             ) == {:error, :rate_limit_exceeded}
     end
 
     test "returns :alias_not_found when alias doesn't exist locally", %{dht_pid: dht_pid} do
       {owner_pub, owner_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       owner_node_id = Keys.node_id_from_public_key(owner_pub)
 
-      assert AddressBook.publish_alias(dht_pid, "unknown", owner_node_id, owner_priv, nil, nil) ==
-               {:error, :alias_not_found}
+      assert AddressBook.publish_alias(
+               dht_pid,
+               "unknown",
+               owner_node_id,
+               owner_priv,
+               ed25519_priv,
+               ed25519_pub
+             ) == {:error, :alias_not_found}
     end
   end
 
   describe "verify_published_alias/2" do
     test "verifies valid published alias signature", %{dht_pid: dht_pid} do
       {owner_pub, owner_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       owner_node_id = Keys.node_id_from_public_key(owner_pub)
 
       AddressBook.register("alice", owner_node_id, owner_pub, owner_priv)
 
-      :ok = DHT.announce_node(dht_pid, owner_pub, owner_priv, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          owner_pub,
+          owner_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
       Process.sleep(50)
 
-      :ok = AddressBook.publish_alias(dht_pid, "alice", owner_node_id, owner_priv, nil, nil)
+      :ok =
+        AddressBook.publish_alias(
+          dht_pid,
+          "alice",
+          owner_node_id,
+          owner_priv,
+          ed25519_priv,
+          ed25519_pub
+        )
 
       # Retrieve and verify
       key = "alias:alice.mesh:" <> owner_node_id
@@ -479,9 +577,19 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "rejects forged alias (invalid signature size)", %{dht_pid: dht_pid} do
       {owner_pub, owner_priv} = Keys.generate()
+      {ed25519_pub, ed25519_priv} = Keys.keypair()
       owner_node_id = Keys.node_id_from_public_key(owner_pub)
 
-      :ok = DHT.announce_node(dht_pid, owner_pub, owner_priv, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          owner_pub,
+          owner_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_priv,
+          ed25519_public_key: ed25519_pub
+        )
       Process.sleep(50)
 
       # Create forged alias with invalid signature size
@@ -489,15 +597,13 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
         alias: "alice.mesh",
         node_id: owner_node_id,
         owner_public_key: owner_pub,
-        signature: <<0::size(16)>>, # Invalid size (should be 32)
+        signature: <<0::size(16)>>, # Invalid size (should be 64 for Ed25519)
         published_at: :erlang.system_time(:millisecond),
         expires_at: :erlang.system_time(:millisecond) + :timer.hours(24),
-        ed25519_public_key: nil
+        ed25519_public_key: ed25519_pub
       }
 
       # Should reject invalid signature size
-      # Note: HMAC verification only checks size, not actual signature validity
-      # For proper verification, Ed25519 should be used
       assert AddressBook.verify_published_alias(dht_pid, forged_alias) == false
     end
   end
@@ -506,23 +612,51 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
     test "resolves alias from DHT for subscribed node", %{dht_pid: dht_pid} do
       # Setup subscriber
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {sub_ed25519_pub, sub_ed25519_priv} = Keys.keypair()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
 
       # Setup target (publisher)
       {target_pub, target_priv} = Keys.generate()
+      {target_ed25519_pub, target_ed25519_priv} = Keys.keypair()
       target_node_id = Keys.node_id_from_public_key(target_pub)
 
       # Subscribe to target
       AddressBook.subscribe(subscriber_node_id, subscriber_pub, target_node_id)
 
       # Announce both nodes to DHT
-      :ok = DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
-      :ok = DHT.announce_node(dht_pid, target_pub, target_priv, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: sub_ed25519_priv,
+          ed25519_public_key: sub_ed25519_pub
+        )
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          target_pub,
+          target_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: target_ed25519_priv,
+          ed25519_public_key: target_ed25519_pub
+        )
       Process.sleep(50)
 
       # Register and publish alias on target
       AddressBook.register("alice", target_node_id, target_pub, target_priv)
-      :ok = AddressBook.publish_alias(dht_pid, "alice", target_node_id, target_priv, nil, nil)
+      :ok =
+        AddressBook.publish_alias(
+          dht_pid,
+          "alice",
+          target_node_id,
+          target_priv,
+          target_ed25519_priv,
+          target_ed25519_pub
+        )
 
       # Resolve alias from subscriber
       assert AddressBook.resolve_distributed(dht_pid, subscriber_node_id, "alice") ==
@@ -539,15 +673,35 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
 
     test "rejects alias with invalid signature size", %{dht_pid: dht_pid} do
       {subscriber_pub, subscriber_priv} = Keys.generate()
+      {sub_ed25519_pub, sub_ed25519_priv} = Keys.keypair()
       subscriber_node_id = Keys.node_id_from_public_key(subscriber_pub)
 
       {target_pub, target_priv} = Keys.generate()
+      {target_ed25519_pub, target_ed25519_priv} = Keys.keypair()
       target_node_id = Keys.node_id_from_public_key(target_pub)
 
       AddressBook.subscribe(subscriber_node_id, subscriber_pub, target_node_id)
 
-      :ok = DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
-      :ok = DHT.announce_node(dht_pid, target_pub, target_priv, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: sub_ed25519_priv,
+          ed25519_public_key: sub_ed25519_pub
+        )
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          target_pub,
+          target_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: target_ed25519_priv,
+          ed25519_public_key: target_ed25519_pub
+        )
       Process.sleep(50)
 
       # Publish forged alias with invalid signature size directly to DHT (bypassing AddressBook)
@@ -555,10 +709,10 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
         alias: "alice.mesh",
         node_id: target_node_id,
         owner_public_key: target_pub,
-        signature: <<0::size(16)>>, # Invalid size (should be 32)
+        signature: <<0::size(16)>>, # Invalid size (should be 64 for Ed25519)
         published_at: :erlang.system_time(:millisecond),
         expires_at: :erlang.system_time(:millisecond) + :timer.hours(24),
-        ed25519_public_key: nil
+        ed25519_public_key: target_ed25519_pub
       }
 
       key = "alias:alice.mesh:" <> target_node_id
@@ -566,8 +720,6 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
       DHT.put(dht_pid, key, value, :timer.hours(24))
 
       # Should reject invalid signature size
-      # Note: HMAC verification only checks size, not actual signature validity
-      # For proper verification, Ed25519 should be used
       assert AddressBook.resolve_distributed(dht_pid, subscriber_node_id, "alice") ==
                :not_found
     end
@@ -581,10 +733,10 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
         alias: "alice.mesh",
         node_id: :crypto.strong_rand_bytes(32),
         owner_public_key: :crypto.strong_rand_bytes(32),
-        signature: :crypto.strong_rand_bytes(32),
+        signature: :crypto.strong_rand_bytes(64),
         published_at: :erlang.system_time(:millisecond),
         expires_at: :erlang.system_time(:millisecond) + :timer.hours(24),
-        ed25519_public_key: nil
+        ed25519_public_key: :crypto.strong_rand_bytes(32)
       }
 
       # Manually insert into cache (simulating DHT retrieval)
@@ -603,10 +755,10 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
         alias: "alice.mesh",
         node_id: :crypto.strong_rand_bytes(32),
         owner_public_key: :crypto.strong_rand_bytes(32),
-        signature: :crypto.strong_rand_bytes(32),
+        signature: :crypto.strong_rand_bytes(64),
         published_at: :erlang.system_time(:millisecond) - :timer.hours(25),
         expires_at: :erlang.system_time(:millisecond) - :timer.hours(1),
-        ed25519_public_key: nil
+        ed25519_public_key: :crypto.strong_rand_bytes(32)
       }
 
       if :ets.whereis(:chrono_mesh_published_aliases) == :undefined do
@@ -648,8 +800,29 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
                :ok
 
       # Announce both nodes
-      :ok = DHT.announce_node(dht_pid, subscriber_pub, subscriber_priv, :timer.minutes(5), [])
-      :ok = DHT.announce_node(dht_pid, publisher_pub, publisher_priv, :timer.minutes(5), [])
+      {sub_ed25519_pub, sub_ed25519_priv} = Keys.keypair()
+      {pub_ed25519_pub, pub_ed25519_priv} = Keys.keypair()
+
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          subscriber_pub,
+          subscriber_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: sub_ed25519_priv,
+          ed25519_public_key: sub_ed25519_pub
+        )
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          publisher_pub,
+          publisher_priv,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: pub_ed25519_priv,
+          ed25519_public_key: pub_ed25519_pub
+        )
       Process.sleep(50)
 
       # Publish subscription list
@@ -657,14 +830,20 @@ defmodule ChronoMesh.AddressBookSubscriptionsTest do
                dht_pid,
                subscriber_node_id,
                subscriber_priv,
-               nil,
-               nil
+               sub_ed25519_priv,
+               sub_ed25519_pub
              ) == :ok
 
       # Register and publish alias
       AddressBook.register("alice", publisher_node_id, publisher_pub, publisher_priv)
-      assert AddressBook.publish_alias(dht_pid, "alice", publisher_node_id, publisher_priv, nil, nil) ==
-               :ok
+      assert AddressBook.publish_alias(
+               dht_pid,
+               "alice",
+               publisher_node_id,
+               publisher_priv,
+               pub_ed25519_priv,
+               pub_ed25519_pub
+             ) == :ok
 
       # Resolve alias from subscriber
       assert AddressBook.resolve_distributed(dht_pid, subscriber_node_id, "alice") ==

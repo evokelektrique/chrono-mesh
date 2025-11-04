@@ -58,7 +58,7 @@ defmodule ChronoMesh.AddressBook do
 
   Each alias is signed with the node's private key:
   - Message: `alias || node_id || published_at || expires_at`
-  - Signature: Ed25519 (preferred) or HMAC-SHA256 (fallback)
+  - Signature: Ed25519
   - Verification: Checks signature structure and cryptographic validity
 
   ## Subscriptions
@@ -74,15 +74,15 @@ defmodule ChronoMesh.AddressBook do
 
   - DHT Key: `"subs:<subscriber_node_id>"`
   - Contains: List of `node_id`s that the subscriber is subscribed to
-  - Signed: By subscriber's private key (Ed25519 or HMAC-SHA256)
-  - Verified: Using subscriber's public key from DHT announcement
+  - Signed: By subscriber's Ed25519 private key
+  - Verified: Using subscriber's Ed25519 public key from DHT announcement
 
   ### Alias Publishing
 
   - DHT Key: `"alias:<alias_name>:<owner_node_id>"`
   - Contains: Published alias with signature and expiration
-  - Signed: By owner's private key (Ed25519 or HMAC-SHA256)
-  - Verified: Using owner's public key from DHT announcement
+  - Signed: By owner's Ed25519 private key
+  - Verified: Using owner's Ed25519 public key from DHT announcement
 
   ## Configuration
 
@@ -351,9 +351,7 @@ defmodule ChronoMesh.AddressBook do
   @doc """
   Verifies an alias entry's signature structure.
 
-  Returns `true` if signature structure is valid (32 bytes), `false` otherwise.
-  Note: Full verification requires the private key (HMAC limitation).
-  Proper verification will be available with Ed25519 support.
+  Returns `true` if signature structure is valid (64 bytes for Ed25519), `false` otherwise.
   """
   @spec verify_alias(String.t()) :: boolean()
   def verify_alias(alias) do
@@ -362,7 +360,7 @@ defmodule ChronoMesh.AddressBook do
 
     case :ets.lookup(@table, full_alias) do
       [{^full_alias, entry}] ->
-        is_binary(entry.signature) and byte_size(entry.signature) == 32
+        is_binary(entry.signature) and byte_size(entry.signature) == 64
 
       _ ->
         false
@@ -636,8 +634,7 @@ defmodule ChronoMesh.AddressBook do
 
     case announcements do
       [announcement | _] ->
-        public_key = announcement.public_key
-        ed25519_pub = Map.get(announcement, :ed25519_public_key)
+        ed25519_pub = announcement.ed25519_public_key
 
         # Verify signature
         message =
@@ -648,14 +645,13 @@ defmodule ChronoMesh.AddressBook do
             subscription_list.expires_at
           )
 
-        # Use Ed25519 if available, otherwise HMAC
+        # Ed25519 verification
         if ed25519_pub != nil and
              subscription_list.ed25519_public_key != nil and
              byte_size(subscription_list.ed25519_public_key) == 32 do
-          Keys.ed25519_verify(message, subscription_list.signature, ed25519_pub)
+          Keys.verify(message, subscription_list.signature, ed25519_pub)
         else
-          # HMAC verification (basic structure check)
-          Keys.verify_public(message, subscription_list.signature, public_key)
+          false
         end
 
       _ ->
@@ -682,17 +678,17 @@ defmodule ChronoMesh.AddressBook do
           String.t(),
           binary(),
           binary(),
-          binary() | nil,
-          binary() | nil,
+          binary(),
+          binary(),
           map() | nil
         ) :: :ok | {:error, atom()}
   def publish_alias(
         dht_pid,
         alias_name,
         node_id,
-        private_key,
-        ed25519_private_key \\ nil,
-        ed25519_public_key \\ nil,
+        _private_key,
+        ed25519_private_key,
+        ed25519_public_key,
         config \\ nil
       )
 
@@ -700,14 +696,15 @@ defmodule ChronoMesh.AddressBook do
         dht_pid,
         alias_name,
         node_id,
-        private_key,
+        _private_key,
         ed25519_private_key,
         ed25519_public_key,
         config
       )
       when is_pid(dht_pid) and is_binary(alias_name) and is_binary(node_id) and
-             byte_size(node_id) == 32 and is_binary(private_key) and
-             byte_size(private_key) == 32 do
+             byte_size(node_id) == 32 and is_binary(ed25519_private_key) and
+             byte_size(ed25519_private_key) == 32 and is_binary(ed25519_public_key) and
+             byte_size(ed25519_public_key) == 32 do
     ensure_table()
     ensure_alias_rate_limit_table()
 
@@ -728,22 +725,7 @@ defmodule ChronoMesh.AddressBook do
           # Sign the published alias
           message = encode_published_alias_message(full_alias, node_id, published_at, expires_at)
 
-          {signature, ed25519_pub} =
-            if ed25519_private_key != nil and ed25519_public_key != nil and
-                 byte_size(ed25519_private_key) == 32 and byte_size(ed25519_public_key) == 32 do
-              try do
-                sig = Keys.ed25519_sign(message, ed25519_private_key)
-                {sig, ed25519_public_key}
-              rescue
-                _ ->
-                  # Fallback to HMAC
-                  sig = Keys.sign(message, private_key)
-                  {sig, nil}
-              end
-            else
-              sig = Keys.sign(message, private_key)
-              {sig, nil}
-            end
+          signature = Keys.sign(message, ed25519_private_key)
 
           published_alias = %{
             alias: full_alias,
@@ -752,7 +734,7 @@ defmodule ChronoMesh.AddressBook do
             signature: signature,
             published_at: published_at,
             expires_at: expires_at,
-            ed25519_public_key: ed25519_pub
+            ed25519_public_key: ed25519_public_key
           }
 
           # Encode for DHT storage
@@ -791,8 +773,7 @@ defmodule ChronoMesh.AddressBook do
 
     case announcements do
       [announcement | _] ->
-        public_key = announcement.public_key
-        ed25519_pub = Map.get(announcement, :ed25519_public_key)
+        ed25519_pub = announcement.ed25519_public_key
 
         # Verify signature
         message =
@@ -803,14 +784,13 @@ defmodule ChronoMesh.AddressBook do
             published_alias.expires_at
           )
 
-        # Use Ed25519 if available, otherwise HMAC
+        # Ed25519 verification
         if ed25519_pub != nil and
              published_alias.ed25519_public_key != nil and
              byte_size(published_alias.ed25519_public_key) == 32 do
-          Keys.ed25519_verify(message, published_alias.signature, ed25519_pub)
+          Keys.verify(message, published_alias.signature, ed25519_pub)
         else
-          # HMAC verification (basic structure check)
-          Keys.verify_public(message, published_alias.signature, public_key)
+          false
         end
 
       _ ->
@@ -842,7 +822,13 @@ defmodule ChronoMesh.AddressBook do
     end
   end
 
-  defp sign_subscription_list(sub_list, private_key, ed25519_private_key, ed25519_public_key) do
+  defp sign_subscription_list(sub_list, _private_key, ed25519_private_key, ed25519_public_key) do
+    unless ed25519_private_key != nil and ed25519_public_key != nil and
+             is_binary(ed25519_private_key) and byte_size(ed25519_private_key) == 32 and
+             is_binary(ed25519_public_key) and byte_size(ed25519_public_key) == 32 do
+      raise ArgumentError, "ed25519_private_key and ed25519_public_key must be 32-byte binaries"
+    end
+
     message =
       encode_subscription_list_message(
         sub_list.subscriber_node_id,
@@ -851,25 +837,9 @@ defmodule ChronoMesh.AddressBook do
         sub_list.expires_at
       )
 
-    # Use Ed25519 if available, otherwise HMAC-SHA256
-    {signature, ed25519_pub} =
-      if ed25519_private_key != nil and ed25519_public_key != nil and
-           byte_size(ed25519_private_key) == 32 and byte_size(ed25519_public_key) == 32 do
-        try do
-          sig = Keys.ed25519_sign(message, ed25519_private_key)
-          {sig, ed25519_public_key}
-        rescue
-          _ ->
-            # Fallback to HMAC
-            sig = Keys.sign(message, private_key)
-            {sig, nil}
-        end
-      else
-        sig = Keys.sign(message, private_key)
-        {sig, nil}
-      end
+    signature = Keys.sign(message, ed25519_private_key)
 
-    %{sub_list | signature: signature, ed25519_public_key: ed25519_pub}
+    %{sub_list | signature: signature, ed25519_public_key: ed25519_public_key}
   end
 
   defp encode_subscription_list_message(

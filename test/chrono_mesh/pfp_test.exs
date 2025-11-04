@@ -9,8 +9,16 @@ defmodule ChronoMesh.PFPTest do
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :connection_error
       {private_key, _public_key} = Keys.generate()
+      {_ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       assert is_map(failure_notice)
       assert failure_notice.frame_id == frame_id
@@ -26,8 +34,16 @@ defmodule ChronoMesh.PFPTest do
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :timeout
       {private_key, _public_key} = Keys.generate()
+      {_ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       assert is_integer(failure_notice.timestamp)
       assert failure_notice.timestamp > 0
@@ -38,80 +54,113 @@ defmodule ChronoMesh.PFPTest do
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :connection_error
       {private_key, _public_key} = Keys.generate()
+      {_ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       assert is_binary(failure_notice.signature)
-      assert byte_size(failure_notice.signature) > 0
+      assert byte_size(failure_notice.signature) == 64
     end
   end
 
   describe "verify_failure_notice/2" do
-    test "verifies a valid failure notice" do
-      frame_id = :crypto.strong_rand_bytes(16)
-      failed_node_id = :crypto.strong_rand_bytes(32)
-      failure_type = :timeout
-      {private_key, public_key} = Keys.generate()
-
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
-
-      assert PFP.verify_failure_notice(failure_notice, public_key) == true
-    end
-
-    test "rejects a failure notice with invalid signature size" do
+    test "verifies a valid Ed25519 failure notice" do
       frame_id = :crypto.strong_rand_bytes(16)
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :connection_error
       {private_key, public_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
-      # Tamper with signature size (HMAC verification only checks size)
-      tampered_notice = %{failure_notice | signature: <<0, 0, 0>>}
-
-      # Should fail with invalid signature size
-      assert PFP.verify_failure_notice(tampered_notice, public_key) == false
+      assert PFP.verify_failure_notice(failure_notice, public_key,
+               ed25519_public_key: ed25519_public_key
+             ) == true
     end
 
-    test "rejects a tampered failure notice with invalid signature size" do
+    test "rejects invalid Ed25519 signature" do
       frame_id = :crypto.strong_rand_bytes(16)
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :timeout
       {private_key, public_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
-      # Tamper with the signature size (HMAC verification only checks size)
-      tampered_notice = %{failure_notice | signature: <<0, 0, 0>>}
+      # Tamper with signature
+      tampered_notice = %{failure_notice | signature: :crypto.strong_rand_bytes(64)}
 
-      assert PFP.verify_failure_notice(tampered_notice, public_key) == false
+      assert PFP.verify_failure_notice(tampered_notice, public_key,
+               ed25519_public_key: ed25519_public_key
+             ) == false
     end
   end
 
   describe "handle_failure_notice/2" do
-    test "accepts a valid failure notice" do
-      frame_id = :crypto.strong_rand_bytes(16)
-      failed_node_id = :crypto.strong_rand_bytes(32)
-      failure_type = :connection_error
-      {private_key, public_key} = Keys.generate()
-
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
-
-      assert PFP.handle_failure_notice(failure_notice, public_key) == :ok
-    end
-
-    test "rejects a failure notice with invalid signature size" do
+    test "accepts a valid Ed25519 failure notice" do
       frame_id = :crypto.strong_rand_bytes(16)
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :timeout
       {private_key, public_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
-      # Tamper with signature size (HMAC verification only checks size)
-      tampered_notice = %{failure_notice | signature: <<0, 0, 0>>}
+      assert PFP.handle_failure_notice(failure_notice, public_key,
+               ed25519_public_key: ed25519_public_key
+             ) == :ok
+    end
 
-      assert PFP.handle_failure_notice(tampered_notice, public_key) == {:error, :invalid_signature}
+    test "rejects invalid Ed25519 signature" do
+      frame_id = :crypto.strong_rand_bytes(16)
+      failed_node_id = :crypto.strong_rand_bytes(32)
+      failure_type = :connection_error
+      {private_key, public_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
+
+      # Tamper with signature
+      tampered_notice = %{failure_notice | signature: :crypto.strong_rand_bytes(64)}
+
+      assert PFP.handle_failure_notice(tampered_notice, public_key,
+               ed25519_public_key: ed25519_public_key
+             ) == {:error, :invalid_signature}
     end
   end
 
@@ -236,6 +285,10 @@ defmodule ChronoMesh.PFPTest do
       {private_key, _public_key} = Keys.generate()
       Keys.write_private_key!(key_path, private_key)
 
+      {ed25519_private_key_for_node, _ed25519_public_key_for_node} = Keys.keypair()
+      ed25519_key_path = Path.join(tmp_dir, "test_ed25519_private_key_#{System.unique_integer([:positive])}.pem")
+      Keys.write_private_key!(ed25519_key_path, ed25519_private_key_for_node)
+
       # Start a node process
       config = %{
         "network" => %{
@@ -244,7 +297,8 @@ defmodule ChronoMesh.PFPTest do
           "wave_duration_secs" => 10
         },
         "identity" => %{
-          "private_key_path" => key_path
+          "private_key_path" => key_path,
+          "ed25519_private_key_path" => ed25519_key_path
         }
       }
 
@@ -254,7 +308,16 @@ defmodule ChronoMesh.PFPTest do
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :timeout
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      {_ed25519_public_key, ed25519_private_key} = Keys.keypair()
+
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
       path = [:crypto.strong_rand_bytes(32)]
 
       assert PFP.send_failure_notice(failure_notice, path, config) == :ok
@@ -262,6 +325,7 @@ defmodule ChronoMesh.PFPTest do
       # Cleanup
       GenServer.stop(ChronoMesh.Node)
       File.rm(key_path)
+      File.rm(ed25519_key_path)
     end
 
     test "returns error when node is not running" do
@@ -276,7 +340,16 @@ defmodule ChronoMesh.PFPTest do
       failure_type = :connection_error
       {private_key, _public_key} = Keys.generate()
 
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      {_ed25519_public_key, ed25519_private_key} = Keys.keypair()
+
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
       path = [:crypto.strong_rand_bytes(32)]
 
       assert PFP.send_failure_notice(failure_notice, path, %{}) == {:error, :node_not_running}
@@ -289,15 +362,27 @@ defmodule ChronoMesh.PFPTest do
       failed_node_id = :crypto.strong_rand_bytes(32)
       failure_type = :timeout
       {private_key, public_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
-      # Detect failure
-      failure_notice = PFP.detect_failure(frame_id, failed_node_id, failure_type, private_key)
+      # Detect failure (Ed25519)
+      failure_notice =
+        PFP.detect_failure(
+          frame_id,
+          failed_node_id,
+          failure_type,
+          private_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       # Verify failure notice
-      assert PFP.verify_failure_notice(failure_notice, public_key) == true
+      assert PFP.verify_failure_notice(failure_notice, public_key,
+               ed25519_public_key: ed25519_public_key
+             ) == true
 
       # Handle failure notice
-      assert PFP.handle_failure_notice(failure_notice, public_key) == :ok
+      assert PFP.handle_failure_notice(failure_notice, public_key,
+               ed25519_public_key: ed25519_public_key
+             ) == :ok
 
       # Reroute path
       node1 = :crypto.strong_rand_bytes(32)

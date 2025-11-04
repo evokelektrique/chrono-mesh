@@ -3,10 +3,10 @@ defmodule ChronoMesh.Ed25519Test do
 
   alias ChronoMesh.Keys
 
-  describe "ed25519_keypair/0" do
+  describe "keypair/0" do
     test "generates Ed25519 keypair" do
       try do
-        {public_key, private_key} = Keys.ed25519_keypair()
+        {public_key, private_key} = Keys.keypair()
 
         assert is_binary(public_key)
         assert is_binary(private_key)
@@ -26,8 +26,8 @@ defmodule ChronoMesh.Ed25519Test do
 
     test "each keypair is unique" do
       try do
-        {pub1, _priv1} = Keys.ed25519_keypair()
-        {pub2, _priv2} = Keys.ed25519_keypair()
+        {pub1, _priv1} = Keys.keypair()
+        {pub2, _priv2} = Keys.keypair()
 
         assert pub1 != pub2
       rescue
@@ -41,22 +41,22 @@ defmodule ChronoMesh.Ed25519Test do
     end
   end
 
-  describe "ed25519_sign/2 and ed25519_verify/3" do
+  describe "sign/2 and verify/3" do
     test "signs and verifies message" do
       try do
-        {public_key, private_key} = Keys.ed25519_keypair()
+        {public_key, private_key} = Keys.keypair()
         message = "Hello, ChronoMesh!"
 
-        signature = Keys.ed25519_sign(message, private_key)
+        signature = Keys.sign(message, private_key)
 
         assert is_binary(signature)
         assert byte_size(signature) == 64
 
         # Verify signature
-        assert Keys.ed25519_verify(message, signature, public_key) == true
+        assert Keys.verify(message, signature, public_key) == true
 
         # Verify wrong message fails
-        assert Keys.ed25519_verify("Wrong message", signature, public_key) == false
+        assert Keys.verify("Wrong message", signature, public_key) == false
       rescue
         e ->
           if String.contains?(inspect(e), "not supported") do
@@ -69,11 +69,11 @@ defmodule ChronoMesh.Ed25519Test do
 
     test "signature is deterministic" do
       try do
-        {_public_key, private_key} = Keys.ed25519_keypair()
+        {_public_key, private_key} = Keys.keypair()
         message = "Test message"
 
-        sig1 = Keys.ed25519_sign(message, private_key)
-        sig2 = Keys.ed25519_sign(message, private_key)
+        sig1 = Keys.sign(message, private_key)
+        sig2 = Keys.sign(message, private_key)
 
         # Ed25519 signatures are deterministic (same message + key = same signature)
         assert sig1 == sig2
@@ -89,17 +89,17 @@ defmodule ChronoMesh.Ed25519Test do
 
     test "wrong public key fails verification" do
       try do
-        {public_key1, private_key1} = Keys.ed25519_keypair()
-        {public_key2, _private_key2} = Keys.ed25519_keypair()
+        {public_key1, private_key1} = Keys.keypair()
+        {public_key2, _private_key2} = Keys.keypair()
 
         message = "Test message"
-        signature = Keys.ed25519_sign(message, private_key1)
+        signature = Keys.sign(message, private_key1)
 
         # Correct public key verifies
-        assert Keys.ed25519_verify(message, signature, public_key1) == true
+        assert Keys.verify(message, signature, public_key1) == true
 
         # Wrong public key fails
-        assert Keys.ed25519_verify(message, signature, public_key2) == false
+        assert Keys.verify(message, signature, public_key2) == false
       rescue
         e ->
           if String.contains?(inspect(e), "not supported") do
@@ -112,20 +112,20 @@ defmodule ChronoMesh.Ed25519Test do
 
     test "verification with invalid signature returns false" do
       try do
-        {public_key, private_key} = Keys.ed25519_keypair()
+        {public_key, private_key} = Keys.keypair()
         message = "Test message"
 
         # Valid signature
-        valid_sig = Keys.ed25519_sign(message, private_key)
-        assert Keys.ed25519_verify(message, valid_sig, public_key) == true
+        valid_sig = Keys.sign(message, private_key)
+        assert Keys.verify(message, valid_sig, public_key) == true
 
         # Invalid signature (wrong size)
         invalid_sig = <<0::size(64)>>
-        assert Keys.ed25519_verify(message, invalid_sig, public_key) == false
+        assert Keys.verify(message, invalid_sig, public_key) == false
 
         # Invalid signature (random bytes)
         random_sig = :crypto.strong_rand_bytes(64)
-        assert Keys.ed25519_verify(message, random_sig, public_key) == false
+        assert Keys.verify(message, random_sig, public_key) == false
       rescue
         e ->
           if String.contains?(inspect(e), "not supported") do
@@ -137,20 +137,16 @@ defmodule ChronoMesh.Ed25519Test do
     end
   end
 
-  describe "Ed25519 vs HMAC comparison" do
+  describe "Ed25519 signature verification" do
     test "Ed25519 allows verification with public key only" do
       try do
-        {public_key, private_key} = Keys.ed25519_keypair()
+        {public_key, private_key} = Keys.keypair()
         message = "Test message"
 
-        signature = Keys.ed25519_sign(message, private_key)
+        signature = Keys.sign(message, private_key)
 
         # Can verify with only public key (no private key needed)
-        assert Keys.ed25519_verify(message, signature, public_key) == true
-
-        # HMAC requires private key to verify
-        hmac_sig = Keys.sign(message, private_key)
-        assert Keys.verify(message, hmac_sig, public_key, private_key) == true
+        assert Keys.verify(message, signature, public_key) == true
       rescue
         e ->
           if String.contains?(inspect(e), "not supported") do

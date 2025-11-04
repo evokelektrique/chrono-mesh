@@ -74,6 +74,7 @@ defmodule ChronoMesh.SecurityTest do
   describe "Security: circular introduction point chains" do
     test "detects and prevents circular introduction points" do
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Create announcement with self-referencing introduction point
@@ -86,9 +87,15 @@ defmodule ChronoMesh.SecurityTest do
 
       # Announce with circular reference
       :ok =
-        DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [
-          circular_intro_point
-        ])
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [circular_intro_point],
+          ed25519_public_key: ed25519_public_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       # Should handle gracefully
       result = ControlClient.enqueue_remote(node_id, [])
@@ -133,6 +140,7 @@ defmodule ChronoMesh.SecurityTest do
   describe "Security: introduction point limits" do
     test "DHT limits introduction point count to prevent DoS" do
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
       # Create many introduction points (DoS attempt)
       many_intro_points =
@@ -149,7 +157,15 @@ defmodule ChronoMesh.SecurityTest do
 
       # Should only accept up to 10 introduction points
       :ok =
-        DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), many_intro_points)
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          many_intro_points,
+          ed25519_public_key: ed25519_public_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       # Verify announcement was created (with limited intro points)
       node_id = Keys.node_id_from_public_key(public_key)
@@ -166,63 +182,107 @@ defmodule ChronoMesh.SecurityTest do
 
   describe "Security: binary decoding failures" do
     test "Discovery handles invalid node_id hex gracefully" do
-      config = %{
-        "network" => %{
-          "bootstrap_peers" => [
-            %{"node_id" => "invalid-hex-string!!!"}
-          ]
-        }
-      }
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+      tmp_dir = System.tmp_dir!()
+      ed25519_priv_path = Path.join(tmp_dir, "test_ed25519_invalid_node.key")
+      ed25519_pub_path = Path.join(tmp_dir, "test_ed25519_invalid_node_pub.key")
 
-      # Should not crash
-      {:ok, pid} = Discovery.start_link(config)
-      assert Process.alive?(pid)
-      Process.exit(pid, :normal)
+      try do
+        Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+        Keys.write_public_key!(ed25519_pub_path, ed25519_public_key)
+
+        config = %{
+          "identity" => %{
+            "ed25519_private_key_path" => ed25519_priv_path,
+            "ed25519_public_key_path" => ed25519_pub_path
+          },
+          "network" => %{
+            "bootstrap_peers" => [
+              %{"node_id" => "invalid-hex-string!!!"}
+            ]
+          }
+        }
+
+        # Should not crash
+        {:ok, pid} = Discovery.start_link(config)
+        assert Process.alive?(pid)
+        Process.exit(pid, :normal)
+      after
+        File.rm(ed25519_priv_path)
+        File.rm(ed25519_pub_path)
+      end
     end
 
     test "Discovery handles invalid public_key base64 gracefully" do
-      config = %{
-        "network" => %{
-          "bootstrap_peers" => [
-            %{"public_key" => "not-base64!!!"}
-          ]
-        }
-      }
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+      tmp_dir = System.tmp_dir!()
+      ed25519_priv_path = Path.join(tmp_dir, "test_ed25519_invalid.key")
+      ed25519_pub_path = Path.join(tmp_dir, "test_ed25519_invalid_pub.key")
 
-      # Should not crash - decode_pk handles errors
-      {:ok, pid} = Discovery.start_link(config)
-      assert Process.alive?(pid)
-      Process.exit(pid, :normal)
+      try do
+        Keys.write_private_key!(ed25519_priv_path, ed25519_private_key)
+        Keys.write_public_key!(ed25519_pub_path, ed25519_public_key)
+
+        config = %{
+          "identity" => %{
+            "ed25519_private_key_path" => ed25519_priv_path,
+            "ed25519_public_key_path" => ed25519_pub_path
+          },
+          "network" => %{
+            "bootstrap_peers" => [
+              %{"public_key" => "not-base64!!!"}
+            ]
+          }
+        }
+
+        # Should not crash - decode_pk handles errors
+        {:ok, pid} = Discovery.start_link(config)
+        assert Process.alive?(pid)
+        Process.exit(pid, :normal)
+      after
+        File.rm(ed25519_priv_path)
+        File.rm(ed25519_pub_path)
+      end
     end
   end
 
   describe "Security: signature validation" do
-    test "verify_public checks signature size" do
-      {public_key, private_key} = Keys.generate()
+    test "verify checks signature size" do
+      {public_key, private_key} = Keys.keypair()
       message = "test"
 
       signature = Keys.sign(message, private_key)
 
       # Valid signature
-      assert Keys.verify_public(message, signature, public_key) == true
+      assert Keys.verify(message, signature, public_key) == true
 
       # Invalid signature size
       invalid_sig = <<0::size(16)>>
-      assert Keys.verify_public(message, invalid_sig, public_key) == false
+      assert Keys.verify(message, invalid_sig, public_key) == false
 
       # Invalid public key size
       invalid_pub = <<0::size(16)>>
-      assert Keys.verify_public(message, signature, invalid_pub) == false
+      assert Keys.verify(message, signature, invalid_pub) == false
     end
   end
 
   describe "Security: expired announcement rejection" do
     test "DHT rejects expired announcements" do
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       {:ok, dht_pid} = DHT.start_link(address: :expiry_test)
 
       # Create announcement with very short TTL
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, 10)
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          10,
+          [],
+          ed25519_public_key: ed25519_public_key,
+          ed25519_private_key: ed25519_private_key
+        )
 
       node_id = Keys.node_id_from_public_key(public_key)
 

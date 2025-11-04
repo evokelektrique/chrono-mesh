@@ -13,9 +13,19 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
       # Announce node
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
 
       # Wait a bit for announcement to be stored
       Process.sleep(50)
@@ -38,11 +48,30 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
 
       # Announce twice
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       # Lookup announcements
@@ -63,10 +92,20 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Announce node
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       # Get the announcement with its nonce
@@ -90,10 +129,20 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Announce node
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       # Get the announcement
@@ -121,10 +170,20 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Normal announcement should work
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       announcements = DHT.lookup_nodes(dht_pid, node_id, 1)
@@ -148,7 +207,18 @@ defmodule ChronoMesh.ReplayProtectionTest do
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Announce with very short TTL
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, 10, [])
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          10,
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
 
       # Wait for expiration
       Process.sleep(100)
@@ -166,10 +236,20 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Announce with normal TTL
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       announcements = DHT.lookup_nodes(dht_pid, node_id, 1)
@@ -191,15 +271,35 @@ defmodule ChronoMesh.ReplayProtectionTest do
       {:ok, dht_pid} = DHT.start_link([])
 
       {public_key1, private_key1} = Keys.generate()
+      {ed25519_public_key1, ed25519_private_key1} = Keys.keypair()
       {public_key2, private_key2} = Keys.generate()
+      {ed25519_public_key2, ed25519_private_key2} = Keys.keypair()
 
       node_id1 = Keys.node_id_from_public_key(public_key1)
       node_id2 = Keys.node_id_from_public_key(public_key2)
 
       # Announce both nodes
-      :ok = DHT.announce_node(dht_pid, public_key1, private_key1, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key1,
+          private_key1,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key1,
+          ed25519_public_key: ed25519_public_key1
+        )
       Process.sleep(50)
-      :ok = DHT.announce_node(dht_pid, public_key2, private_key2, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key2,
+          private_key2,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key2,
+          ed25519_public_key: ed25519_public_key2
+        )
       Process.sleep(50)
 
       # Both should be found
@@ -222,13 +322,33 @@ defmodule ChronoMesh.ReplayProtectionTest do
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Announce with short TTL
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, 100, [])
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          100,
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
 
       # Wait for expiration
       Process.sleep(200)
 
       # Announce again with new nonce
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
 
       # New announcement should be accepted
       announcements = DHT.lookup_nodes(dht_pid, node_id, 1)
@@ -244,10 +364,20 @@ defmodule ChronoMesh.ReplayProtectionTest do
 
       # Create invalid announcement (missing nonce)
       {public_key, private_key} = Keys.generate()
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
       node_id = Keys.node_id_from_public_key(public_key)
 
       # Normal announcement should work
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       announcements = DHT.lookup_nodes(dht_pid, node_id, 1)
@@ -266,7 +396,17 @@ defmodule ChronoMesh.ReplayProtectionTest do
 
       # Normal announcement should work (nonce size is validated)
       {public_key, private_key} = Keys.generate()
-      :ok = DHT.announce_node(dht_pid, public_key, private_key, :timer.minutes(5), [])
+      {ed25519_public_key, ed25519_private_key} = Keys.keypair()
+      :ok =
+        DHT.announce_node(
+          dht_pid,
+          public_key,
+          private_key,
+          :timer.minutes(5),
+          [],
+          ed25519_private_key: ed25519_private_key,
+          ed25519_public_key: ed25519_public_key
+        )
       Process.sleep(50)
 
       node_id = Keys.node_id_from_public_key(public_key)

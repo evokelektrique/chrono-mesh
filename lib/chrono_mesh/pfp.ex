@@ -38,14 +38,21 @@ defmodule ChronoMesh.PFP do
 
   Returns a failure notice packet that can be sent upstream to notify
   the sender about the path failure.
+
+  Uses Ed25519 signatures exclusively.
   """
-  @spec detect_failure(frame_id(), node_id(), failure_type(), binary()) ::
+  @spec detect_failure(frame_id(), node_id(), failure_type(), binary(), keyword()) ::
           failure_notice()
-  def detect_failure(frame_id, failed_node_id, failure_type, private_key)
+  def detect_failure(frame_id, failed_node_id, failure_type, _private_key, opts \\ [])
       when is_binary(frame_id) and byte_size(frame_id) == 16 and
              is_binary(failed_node_id) and byte_size(failed_node_id) == 32 and
-             is_atom(failure_type) and is_binary(private_key) do
+             is_atom(failure_type) do
     timestamp = System.system_time(:millisecond)
+    ed25519_private_key = Keyword.fetch!(opts, :ed25519_private_key)
+
+    unless is_binary(ed25519_private_key) and byte_size(ed25519_private_key) == 32 do
+      raise ArgumentError, "ed25519_private_key must be a 32-byte binary"
+    end
 
     # Compose failure notice
     failure_notice = %{
@@ -58,7 +65,7 @@ defmodule ChronoMesh.PFP do
 
     # Sign the failure notice
     message = encode_failure_notice_message(failure_notice)
-    signature = ChronoMesh.Keys.sign(message, private_key)
+    signature = ChronoMesh.Keys.sign(message, ed25519_private_key)
 
     %{failure_notice | signature: signature}
   end
@@ -95,17 +102,26 @@ defmodule ChronoMesh.PFP do
 
   Verifies the failure notice signature and processes it.
   Returns `:ok` if valid, `{:error, reason}` if invalid.
+
+  Uses Ed25519 signature verification exclusively.
   """
-  @spec handle_failure_notice(failure_notice(), binary()) :: :ok | {:error, term()}
-  def handle_failure_notice(failure_notice, public_key)
-      when is_map(failure_notice) and is_binary(public_key) do
+  @spec handle_failure_notice(failure_notice(), binary(), keyword()) :: :ok | {:error, term()}
+  def handle_failure_notice(failure_notice, _public_key, opts \\ [])
+      when is_map(failure_notice) do
     # Verify signature
     message = encode_failure_notice_message(failure_notice)
+    ed25519_public_key = Keyword.fetch!(opts, :ed25519_public_key)
 
-    if ChronoMesh.Keys.verify_public(message, failure_notice.signature, public_key) do
-      :ok
+    unless is_binary(ed25519_public_key) and byte_size(ed25519_public_key) == 32 do
+      {:error, :invalid_public_key}
     else
-      {:error, :invalid_signature}
+      valid = ChronoMesh.Keys.verify(message, failure_notice.signature, ed25519_public_key)
+
+      if valid do
+        :ok
+      else
+        {:error, :invalid_signature}
+      end
     end
   end
 
@@ -151,12 +167,20 @@ defmodule ChronoMesh.PFP do
   Verifies a failure notice signature using the sender's public key.
 
   Returns `true` if valid, `false` otherwise.
+
+  Uses Ed25519 signature verification exclusively.
   """
-  @spec verify_failure_notice(failure_notice(), binary()) :: boolean()
-  def verify_failure_notice(failure_notice, public_key)
-      when is_map(failure_notice) and is_binary(public_key) do
+  @spec verify_failure_notice(failure_notice(), binary(), keyword()) :: boolean()
+  def verify_failure_notice(failure_notice, _public_key, opts \\ [])
+      when is_map(failure_notice) do
     message = encode_failure_notice_message(failure_notice)
-    ChronoMesh.Keys.verify_public(message, failure_notice.signature, public_key)
+    ed25519_public_key = Keyword.fetch!(opts, :ed25519_public_key)
+
+    unless is_binary(ed25519_public_key) and byte_size(ed25519_public_key) == 32 do
+      false
+    else
+      ChronoMesh.Keys.verify(message, failure_notice.signature, ed25519_public_key)
+    end
   end
 
   # Private helpers -----------------------------------------------------------

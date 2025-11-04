@@ -56,8 +56,8 @@ defmodule ChronoMesh.Discovery do
           dht_pid: pid() | nil,
           private_key: binary() | nil,
           public_key: binary() | nil,
-          ed25519_private_key: binary() | nil,
-          ed25519_public_key: binary() | nil,
+          ed25519_private_key: binary(),
+          ed25519_public_key: binary(),
           announce_interval: non_neg_integer(),
           refresh_interval: non_neg_integer(),
           last_announce: non_neg_integer()
@@ -424,23 +424,22 @@ defmodule ChronoMesh.Discovery do
 
   defp load_keys(_), do: {nil, nil}
 
-  @spec load_ed25519_keys(map()) :: {binary() | nil, binary() | nil}
+  @spec load_ed25519_keys(map()) :: {binary(), binary()}
   defp load_ed25519_keys(%{
          "identity" => %{
            "ed25519_private_key_path" => priv_path,
            "ed25519_public_key_path" => pub_path
          }
        }) do
-    try do
-      ed25519_private_key = Keys.read_private_key!(priv_path)
-      ed25519_public_key = Keys.read_public_key!(pub_path)
-      {ed25519_private_key, ed25519_public_key}
-    rescue
-      _ -> {nil, nil}
-    end
+    ed25519_private_key = Keys.read_private_key!(priv_path)
+    ed25519_public_key = Keys.read_public_key!(pub_path)
+    {ed25519_private_key, ed25519_public_key}
   end
 
-  defp load_ed25519_keys(_), do: {nil, nil}
+  defp load_ed25519_keys(_) do
+    raise ArgumentError,
+          "ed25519_private_key_path and ed25519_public_key_path must be configured in config[\"identity\"]"
+  end
 
   @spec publish_self_to_dht(state()) :: state()
   defp publish_self_to_dht(%{dht_pid: nil} = state), do: state
@@ -459,13 +458,11 @@ defmodule ChronoMesh.Discovery do
        ) do
     introduction_points = build_introduction_points(config)
 
-    # Build options for Ed25519 keys if available
-    opts =
-      if ed25519_private_key != nil and ed25519_public_key != nil do
-        [ed25519_private_key: ed25519_private_key, ed25519_public_key: ed25519_public_key]
-      else
-        []
-      end
+    # Build options for Ed25519 keys (required)
+    opts = [
+      ed25519_private_key: ed25519_private_key,
+      ed25519_public_key: ed25519_public_key
+    ]
 
     case DHT.announce_node(
            dht_pid,
@@ -477,7 +474,7 @@ defmodule ChronoMesh.Discovery do
          ) do
       :ok ->
         node_id = Keys.node_id_from_public_key(public_key)
-        sig_type = if ed25519_public_key != nil, do: "Ed25519", else: "HMAC-SHA256"
+        sig_type = "Ed25519"
 
         Logger.info(
           "Discovery: announced self to DHT with node_id #{Base.encode16(node_id)} (#{length(introduction_points)} introduction points, #{sig_type})"

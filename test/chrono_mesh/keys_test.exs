@@ -97,65 +97,46 @@ defmodule ChronoMesh.KeysTest do
     end
   end
 
-  describe "sign/2 and verify/4" do
+  describe "sign/2 and verify/3" do
     test "sign/2 produces consistent signatures" do
-      {_public_key, private_key} = Keys.generate()
+      {_public_key, private_key} = Keys.keypair()
       message = "test message"
 
       signature1 = Keys.sign(message, private_key)
       signature2 = Keys.sign(message, private_key)
 
       assert signature1 == signature2
-      assert byte_size(signature1) == 32
+      assert byte_size(signature1) == 64
     end
 
-    test "verify/4 verifies valid signatures" do
-      {public_key, private_key} = Keys.generate()
+    test "verify/3 verifies valid signatures" do
+      {public_key, private_key} = Keys.keypair()
       message = "test message"
 
       signature = Keys.sign(message, private_key)
-      assert Keys.verify(message, signature, public_key, private_key) == true
+      assert Keys.verify(message, signature, public_key) == true
     end
 
-    test "verify/4 rejects invalid signatures" do
-      {public_key, private_key} = Keys.generate()
-      {_other_pub, other_priv} = Keys.generate()
+    test "verify/3 rejects invalid signatures" do
+      {public_key, _private_key} = Keys.keypair()
+      {_other_pub, other_priv} = Keys.keypair()
       message = "test message"
 
       signature = Keys.sign(message, other_priv)
 
       # Signature from different key should not verify
-      assert Keys.verify(message, signature, public_key, private_key) == false
+      assert Keys.verify(message, signature, public_key) == false
     end
 
-    test "verify/4 rejects tampered messages" do
-      {public_key, private_key} = Keys.generate()
+    test "verify/3 rejects tampered messages" do
+      {public_key, private_key} = Keys.keypair()
       message = "test message"
       tampered = "tampered message"
 
       signature = Keys.sign(message, private_key)
 
       # Signature for original message should not verify tampered message
-      assert Keys.verify(tampered, signature, public_key, private_key) == false
-    end
-
-    test "verify_public/3 performs structure check" do
-      {public_key, private_key} = Keys.generate()
-      message = "test message"
-
-      signature = Keys.sign(message, private_key)
-
-      # verify_public checks structure only (basic validation)
-      assert Keys.verify_public(message, signature, public_key) == true
-    end
-
-    test "verify_public/3 rejects invalid structure" do
-      {public_key, _private_key} = Keys.generate()
-
-      # Invalid signature size
-      invalid_sig = <<0::size(16)>>
-
-      assert Keys.verify_public("message", invalid_sig, public_key) == false
+      assert Keys.verify(tampered, signature, public_key) == false
     end
   end
 
@@ -203,27 +184,27 @@ defmodule ChronoMesh.KeysTest do
 
   describe "edge cases" do
     test "handles empty message" do
-      {public_key, private_key} = Keys.generate()
+      {public_key, private_key} = Keys.keypair()
       message = ""
 
       signature = Keys.sign(message, private_key)
-      assert Keys.verify(message, signature, public_key, private_key) == true
+      assert Keys.verify(message, signature, public_key) == true
     end
 
     test "handles large messages" do
-      {public_key, private_key} = Keys.generate()
+      {public_key, private_key} = Keys.keypair()
       message = String.duplicate("a", 10_000)
 
       signature = Keys.sign(message, private_key)
-      assert Keys.verify(message, signature, public_key, private_key) == true
+      assert Keys.verify(message, signature, public_key) == true
     end
 
     test "handles binary messages" do
-      {public_key, private_key} = Keys.generate()
+      {public_key, private_key} = Keys.keypair()
       message = <<0, 1, 2, 3, 255, 254, 253>>
 
       signature = Keys.sign(message, private_key)
-      assert Keys.verify(message, signature, public_key, private_key) == true
+      assert Keys.verify(message, signature, public_key) == true
     end
   end
 end
