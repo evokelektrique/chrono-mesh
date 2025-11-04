@@ -837,4 +837,108 @@ defmodule ChronoMesh.Config do
       _ -> false
     end
   end
+
+  @doc """
+  Returns whether privacy tiers are enabled in the configuration.
+  """
+  @spec privacy_tiers_enabled?(map()) :: boolean()
+  def privacy_tiers_enabled?(config) do
+    case get_in(config, ["privacy_tiers", "enabled"]) do
+      value when is_boolean(value) -> value
+      value when value in ["true", "1", 1] -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  Returns the multiplier for a given privacy tier.
+  Default multipliers: low=1, medium=2, high=5
+  Returns 1 for unknown tiers.
+  """
+  @spec privacy_tier_multiplier(map(), String.t()) :: non_neg_integer()
+  def privacy_tier_multiplier(config, tier) when is_binary(tier) do
+    # If privacy_tiers config exists, only use values from the tiers map
+    case get_in(config, ["privacy_tiers", "tiers"]) do
+      nil ->
+        # No privacy_tiers config, use standard defaults
+        case tier do
+          "low" -> 1
+          "medium" -> 2
+          "high" -> 5
+          _ -> 1
+        end
+
+      tiers_map when is_map(tiers_map) ->
+        # privacy_tiers config exists, only use configured values
+        case Map.get(tiers_map, tier) do
+          value when is_integer(value) and value > 0 -> value
+          _ -> 1
+        end
+
+      _ ->
+        1
+    end
+  end
+
+  @doc """
+  Returns the minimum trust score from configuration.
+  Default value: 0.0
+  """
+  @spec trust_policy_min_score(map()) :: float()
+  def trust_policy_min_score(config) do
+    case get_in(config, ["trust_policy", "min_trust_score"]) do
+      value when is_float(value) -> value
+      value when is_integer(value) -> value / 1.0
+      value when is_binary(value) ->
+        case Float.parse(value) do
+          {float, _} -> float
+          _ -> 0.0
+        end
+
+      _ ->
+        0.0
+    end
+  end
+
+  @doc """
+  Returns the join challenge timeout in milliseconds.
+  Default value: 30000 (30 seconds)
+  """
+  @spec join_challenge_timeout_ms(map()) :: non_neg_integer()
+  def join_challenge_timeout_ms(config) do
+    case get_in(config, ["join_challenge", "timeout_ms"]) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {int, _} when int > 0 -> int
+          _ -> 30_000
+        end
+
+      _ ->
+        30_000
+    end
+  end
+
+  @doc """
+  Returns the join challenge difficulty level.
+  Default value: 1
+  """
+  @spec join_challenge_difficulty(map()) :: non_neg_integer()
+  def join_challenge_difficulty(config) do
+    case get_in(config, ["join_challenge", "difficulty"]) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {int, _} when int > 0 -> int
+          _ -> 1
+        end
+
+      _ ->
+        1
+    end
+  end
 end

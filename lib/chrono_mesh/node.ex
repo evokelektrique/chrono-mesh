@@ -6,12 +6,6 @@ defmodule ChronoMesh.Node do
   On each wave tick it shuffles the batch and forwards pulses to the next hop.
   """
 
-  @dialyzer {:nowarn_function, handle_cast: 2}
-  @dialyzer {:nowarn_function, process_token: 2}
-  @dialyzer {:nowarn_function, deliver_pulse: 3}
-  @dialyzer {:nowarn_function, store_payload: 2}
-  @dialyzer {:nowarn_function, inbox_path: 0}
-
   use GenServer
   require Logger
 
@@ -22,6 +16,8 @@ defmodule ChronoMesh.Node do
   alias ChronoMesh.PDQ, as: PDQ
   alias ChronoMesh.ODP, as: ODP
   alias ChronoMesh.Config, as: Config
+  alias ChronoMesh.Padding, as: Padding
+  alias ChronoMesh.Guards, as: Guards
 
   @type state :: %{
           wave_duration: pos_integer(),
@@ -36,7 +32,8 @@ defmodule ChronoMesh.Node do
           fdp_pid: pid() | nil,
           pdq_pid: pid() | nil,
           odp_pid: pid() | nil,
-          active_paths: %{optional(binary()) => [binary()]}
+          active_paths: %{optional(binary()) => [binary()]},
+          guards_state: map()
         }
 
   # Public API ----------------------------------------------------------------
@@ -208,6 +205,27 @@ defmodule ChronoMesh.Node do
 
       local_node_id = Keys.node_id_from_public_key(ed25519_public_key)
 
+      # Initialize Guards state
+      guards_state =
+        case Guards.init(config) do
+          {:ok, state} -> state
+          {:error, _reason} -> %{}
+        end
+
+      # Load persisted guards from disk if available
+      home_path = System.get_env("HOME") || "/root"
+      persisted_guards = Guards.load_from_disk(home_path)
+
+      guards_state =
+        if persisted_guards != nil do
+          persisted_guards
+        else
+          guards_state
+        end
+
+      # Schedule initial guard rotation check
+      schedule_guard_rotation_check()
+
       {:ok,
        %{
          wave_duration: wave_duration,
@@ -222,7 +240,8 @@ defmodule ChronoMesh.Node do
          fdp_pid: fdp_pid,
          pdq_pid: pdq_pid,
          odp_pid: odp_pid,
-         active_paths: %{}
+         active_paths: %{},
+         guards_state: guards_state
        }}
     end
   end
@@ -460,8 +479,45 @@ defmodule ChronoMesh.Node do
 
         # Remove from active paths
         updated_paths = Map.delete(state.active_paths, pulse.frame_id)
-        {:noreply, %{state | active_paths: updated_paths}}
+
+        # Record guard failure stats if applicable
+        updated_guards_state = update_guard_stats_on_failure(state.guards_state, node_id)
+
+        {:noreply, %{state | active_paths: updated_paths, guards_state: updated_guards_state}}
     end
+  end
+
+  @impl true
+  @doc false
+  def handle_info(:check_guard_rotation, state) do
+    # Check if guard rotation is needed
+    updated_guards_state =
+      if Guards.needs_rotation?(state.guards_state) do
+        # Rotate guards with available peers
+        peers = get_in(state.config, ["peers"]) || []
+        new_guards = Guards.rotate_guards(state.guards_state, peers)
+        updated = Guards.update_rotation_time(state.guards_state)
+        updated = %{updated | "guards" => new_guards}
+
+        # Save rotated guards to disk
+        home_path = System.get_env("HOME") || "/root"
+        case Guards.save_to_disk(updated, home_path) do
+          :ok ->
+            Logger.info("Guards: Saved rotated guards to disk")
+            updated
+
+          {:error, reason} ->
+            Logger.warning("Guards: Failed to save to disk: #{inspect(reason)}")
+            updated
+        end
+      else
+        state.guards_state
+      end
+
+    # Reschedule next rotation check
+    schedule_guard_rotation_check()
+
+    {:noreply, %{state | guards_state: updated_guards_state}}
   end
 
   @doc false
@@ -518,6 +574,43 @@ defmodule ChronoMesh.Node do
 
     Process.send_after(self(), :wave_tick, millis_until)
   end
+
+  @spec schedule_guard_rotation_check() :: reference()
+  defp schedule_guard_rotation_check do
+    # Check guard rotation every 24 hours (86400000 ms)
+    rotation_check_interval = 86400000
+    Process.send_after(self(), :check_guard_rotation, rotation_check_interval)
+  end
+
+  @spec update_guard_stats_on_success(map(), [binary()]) :: map()
+  defp update_guard_stats_on_success(guards_state, path_nodes) when is_map(guards_state) and is_list(path_nodes) do
+    # Record success for each node in the path that is a guard
+    Enum.reduce(path_nodes, guards_state, fn node_id, acc ->
+      # Check if this node is one of our active guards
+      current_guards = Map.get(acc, "guards", [])
+      if Enum.member?(current_guards, node_id) do
+        # Record success with latency estimate (simplified: 0ms)
+        Guards.record_guard_stat(acc, node_id, :success, 0)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp update_guard_stats_on_success(guards_state, _path_nodes), do: guards_state
+
+  @spec update_guard_stats_on_failure(map(), binary()) :: map()
+  defp update_guard_stats_on_failure(guards_state, failed_node_id) when is_binary(failed_node_id) do
+    # Record failure for the failed node
+    current_guards = Map.get(guards_state, "guards", [])
+    if Enum.member?(current_guards, failed_node_id) do
+      Guards.record_guard_stat(guards_state, failed_node_id, :failure, 0)
+    else
+      guards_state
+    end
+  end
+
+  defp update_guard_stats_on_failure(guards_state, _), do: guards_state
 
   @spec current_wave(pos_integer()) :: non_neg_integer()
   defp current_wave(wave_duration) do
@@ -607,12 +700,27 @@ defmodule ChronoMesh.Node do
 
     case decrypt_result do
       {:ok, plaintext} ->
+        # Remove padding from decrypted payload
+        unpadded_plaintext =
+          case Padding.unpad_payload(plaintext) do
+            {:ok, unpadded} ->
+              unpadded
+
+            {:error, _reason} ->
+              # Fallback to plaintext if unpadding fails (padding might be disabled)
+              plaintext
+          end
+
         # Check if this is an ODP frame (has dialogue_id and sequence_number)
         is_odp_frame = pulse.dialogue_id != nil and pulse.sequence_number != nil
 
         # Route through FDP for frame reassembly if multi-shard
         # Remove from active paths on successful delivery
         updated_paths = Map.delete(state.active_paths, pulse.frame_id)
+
+        # Update guard statistics on successful delivery
+        path_nodes = Map.get(state.active_paths, pulse.frame_id, [])
+        updated_guards_state = update_guard_stats_on_success(state.guards_state, path_nodes)
 
         if pulse.shard_count == 1 do
           # Single shard
@@ -632,14 +740,14 @@ defmodule ChronoMesh.Node do
             case ODP.register_frame(
                    pulse.dialogue_id,
                    pulse.sequence_number,
-                   plaintext,
+                   unpadded_plaintext,
                    sender_id,
                    recipient_id
                  ) do
               {:ok, :delivered} ->
                 Logger.debug("ODP: Frame delivered immediately (seq #{pulse.sequence_number})")
 
-                ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(plaintext)}, %{
+                ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(unpadded_plaintext)}, %{
                   pulse: pulse
                 })
 
@@ -650,16 +758,16 @@ defmodule ChronoMesh.Node do
                 Logger.warning("ODP: Failed to register frame: #{inspect(reason)}")
             end
 
-            %{state | active_paths: updated_paths}
+            %{state | active_paths: updated_paths, guards_state: updated_guards_state}
           else
             # Single shard - store immediately, no reassembly needed
-            store_payload(state, plaintext)
+            store_payload(state, unpadded_plaintext)
 
-            ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(plaintext)}, %{
+            ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(unpadded_plaintext)}, %{
               pulse: pulse
             })
 
-            %{state | active_paths: updated_paths}
+            %{state | active_paths: updated_paths, guards_state: updated_guards_state}
           end
         else
           # Multi-shard - route through FDP
@@ -674,7 +782,7 @@ defmodule ChronoMesh.Node do
                  pulse.frame_id,
                  pulse.shard_index,
                  pulse.shard_count,
-                 plaintext,
+                 unpadded_plaintext,
                  fec_opts
                ) do
             {:ok, :complete} ->
@@ -719,7 +827,7 @@ defmodule ChronoMesh.Node do
                         )
                     end
 
-                    %{state | active_paths: updated_paths}
+                    %{state | active_paths: updated_paths, guards_state: updated_guards_state}
                   else
                     # Store directly (not ODP frame)
                     store_payload(state, reassembled)
@@ -735,7 +843,7 @@ defmodule ChronoMesh.Node do
                     )
 
                     # Return updated state with cleaned paths
-                    %{state | active_paths: updated_paths}
+                    %{state | active_paths: updated_paths, guards_state: updated_guards_state}
                   end
 
                 {:error, reason} ->

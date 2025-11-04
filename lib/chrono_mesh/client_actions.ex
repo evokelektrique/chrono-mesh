@@ -25,7 +25,7 @@ defmodule ChronoMesh.ClientActions do
   See `ChronoMesh.PFP` for details on path failure detection and handling.
   """
 
-  alias ChronoMesh.{AddressBook, FEC, Pulse, Token, Keys}
+  alias ChronoMesh.{AddressBook, FEC, Pulse, Token, Keys, Padding}
 
   @failed_paths_table :chrono_mesh_failed_paths
   @odp_sequences_table :chrono_mesh_odp_sequences
@@ -53,8 +53,8 @@ defmodule ChronoMesh.ClientActions do
 
     path_length = opts[:path_length] || default_path_length(config)
 
-    with {:ok, sender} <- get_sender_peer(config),
-         {:ok, recipient} <- resolve_recipient(peers, recipient_name),
+    with {:ok, recipient} <- resolve_recipient(peers, recipient_name),
+         {:ok, sender} <- get_sender_peer(config),
          {:ok, path} <- build_path_with_sender(peers, recipient, path_length, sender) do
       frame_id = :crypto.strong_rand_bytes(16)
 
@@ -99,9 +99,16 @@ defmodule ChronoMesh.ClientActions do
           {tokens, payload_secret} = build_tokens(path, frame_id, shard_index)
           payload_secret = payload_secret || raise "Failed to derive payload secret"
 
+          # Apply padding for traffic size obfuscation
+          padded_chunk =
+            case Padding.pad_payload(chunk, config) do
+              {:ok, padded} -> padded
+              {:error, _reason} -> chunk  # Fallback to unpadded if padding fails
+            end
+
           # Always use ChaCha20-Poly1305 AEAD encryption
           {payload_ciphertext, auth_tag} =
-            Token.encrypt_aead(payload_secret, frame_id, shard_index, chunk)
+            Token.encrypt_aead(payload_secret, frame_id, shard_index, padded_chunk)
 
           %Pulse{
             frame_id: frame_id,
@@ -127,9 +134,16 @@ defmodule ChronoMesh.ClientActions do
           {tokens, payload_secret} = build_tokens(path, frame_id, shard_index)
           payload_secret = payload_secret || raise "Failed to derive payload secret"
 
+          # Apply padding for traffic size obfuscation
+          padded_parity =
+            case Padding.pad_payload(parity_chunk, config) do
+              {:ok, padded} -> padded
+              {:error, _reason} -> parity_chunk  # Fallback to unpadded if padding fails
+            end
+
           # Always use ChaCha20-Poly1305 AEAD encryption
           {payload_ciphertext, auth_tag} =
-            Token.encrypt_aead(payload_secret, frame_id, shard_index, parity_chunk)
+            Token.encrypt_aead(payload_secret, frame_id, shard_index, padded_parity)
 
           %Pulse{
             frame_id: frame_id,
@@ -338,21 +352,6 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @spec build_path([map()], map(), pos_integer()) :: {:ok, [map()]} | {:error, String.t()}
-  defp build_path(peers, recipient, path_length) do
-    other_peers =
-      peers
-      |> Enum.reject(&(&1 == recipient))
-
-    if length(other_peers) < max(path_length - 1, 0) do
-      {:error, "Not enough peers to build a path of length #{path_length}"}
-    else
-      shuffled = Enum.shuffle(other_peers)
-      intermediates = Enum.take(shuffled, max(path_length - 1, 0))
-      {:ok, intermediates ++ [recipient]}
-    end
-  end
-
   @spec build_tokens([map()], binary(), non_neg_integer()) :: {[binary()], binary() | nil}
   defp build_tokens(path, frame_id, shard_index) do
     path_info = Enum.map(path, &prepare_peer/1)
@@ -367,14 +366,9 @@ defmodule ChronoMesh.ClientActions do
           %{instruction: :forward, node_id: next_peer.node_id}
         end
 
-      case Token.encrypt_token(instruction, peer_info.public_key, frame_id, shard_index) do
-        {:ok, {token, shared}} ->
-          new_acc = if idx == last_index, do: shared, else: acc
-          {token, new_acc}
-
-        {:error, reason} ->
-          raise "Failed to encrypt token: #{inspect(reason)}"
-      end
+      {:ok, {token, shared}} = Token.encrypt_token(instruction, peer_info.public_key, frame_id, shard_index)
+      new_acc = if idx == last_index, do: shared, else: acc
+      {token, new_acc}
     end)
   end
 
@@ -510,9 +504,47 @@ defmodule ChronoMesh.ClientActions do
       {:error,
        "Not enough peers to build a path of length #{path_length} (need #{intermediates_needed} intermediates, have #{length(other_peers)})"}
     else
-      shuffled = Enum.shuffle(other_peers)
-      intermediates = Enum.take(shuffled, intermediates_needed)
+      # Try to use guards for intermediates if available
+      intermediates =
+        case select_guards_for_path(other_peers, intermediates_needed) do
+          guards when is_list(guards) and length(guards) > 0 ->
+            # Pad with random peers if not enough guards
+            if length(guards) < intermediates_needed do
+              remaining_needed = intermediates_needed - length(guards)
+              other_candidates =
+                other_peers
+                |> Enum.reject(fn peer ->
+                  Enum.any?(guards, &(&1 == peer))
+                end)
+
+              guards ++ Enum.take(Enum.shuffle(other_candidates), remaining_needed)
+            else
+              Enum.take(guards, intermediates_needed)
+            end
+
+          _ ->
+            # No guards available, use random selection
+            Enum.take(Enum.shuffle(other_peers), intermediates_needed)
+        end
+
       {:ok, [sender | intermediates ++ [recipient]]}
     end
   end
+
+  @spec select_guards_for_path([map()], pos_integer()) :: [map()]
+  defp select_guards_for_path(peers, needed) when is_list(peers) and needed > 0 do
+    # Query Node process for current guards state
+    case GenServer.whereis(ChronoMesh.Node) do
+      nil ->
+        []
+
+      _pid ->
+        # Try to get guards from Node's state via its public API
+        # For now, use empty list if node not accessible
+        # In future, this could be enhanced with a proper API call
+        []
+    end
+  end
+
+  defp select_guards_for_path(_, _), do: []
 end
