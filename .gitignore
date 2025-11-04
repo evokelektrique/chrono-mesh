@@ -32,3 +32,6 @@ plt/
 # Local developer configuration
 .env
 .tool-versions
+
+test_keys/
+test_data/
