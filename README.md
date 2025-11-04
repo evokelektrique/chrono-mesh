@@ -109,7 +109,7 @@ Experiment with anonymous communication protocols and study anonymity properties
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/chrono_mesh.git
+git clone https://github.com/evokelektrique/chrono_mesh.git
 cd chrono_mesh
 ```
 
@@ -475,8 +475,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 For issues and questions:
 
-- GitHub Issues: [chrono_mesh/issues](https://github.com/yourusername/chrono_mesh/issues)
-- Discussions: [chrono_mesh/discussions](https://github.com/yourusername/chrono_mesh/discussions)
+- GitHub Issues: [chrono_mesh/issues](https://github.com/evokelektrique/chrono_mesh/issues)
+- Discussions: [chrono_mesh/discussions](https://github.com/evokelektrique/chrono_mesh/discussions)
 
 ## Acknowledgments
 
