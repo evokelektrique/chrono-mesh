@@ -4,7 +4,33 @@ defmodule ChronoMesh.FDPFECTest do
   alias ChronoMesh.{FDP, FEC}
 
   setup do
-    # Clean up any existing FDP processes
+    # Clean up any existing FDP process
+    case GenServer.whereis(FDP) do
+      nil ->
+        :ok
+
+      pid ->
+        try do
+          GenServer.stop(pid)
+        rescue
+          ArgumentError -> :ok
+        end
+    end
+
+    on_exit(fn ->
+      case GenServer.whereis(FDP) do
+        nil ->
+          :ok
+
+        pid ->
+          try do
+            if Process.alive?(pid), do: GenServer.stop(pid)
+          rescue
+            ArgumentError -> :ok
+          end
+      end
+    end)
+
     :ok
   end
 
@@ -53,7 +79,11 @@ defmodule ChronoMesh.FDPFECTest do
       expected = "shard0" <> "shard1" <> "shard2" <> "shard3"
       assert reassembled == expected
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
 
     test "cannot recover if more than parity_count shards lost" do
@@ -91,7 +121,11 @@ defmodule ChronoMesh.FDPFECTest do
       # Reassemble should fail
       assert {:error, :frame_incomplete} = FDP.reassemble(frame_id)
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
 
     test "works when all data shards received (no recovery needed)" do
@@ -127,7 +161,11 @@ defmodule ChronoMesh.FDPFECTest do
       expected = "shard0" <> "shard1" <> "shard2"
       assert reassembled == expected
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
 
     test "works when parity shard is lost but all data shards received" do
@@ -165,7 +203,11 @@ defmodule ChronoMesh.FDPFECTest do
       expected = "shard0" <> "shard1" <> "shard2"
       assert reassembled == expected
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
   end
 
@@ -189,7 +231,11 @@ defmodule ChronoMesh.FDPFECTest do
       expected = "shard0" <> "shard1" <> "shard2"
       assert reassembled == expected
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
 
     test "cannot recover missing shards when FEC disabled" do
@@ -208,7 +254,11 @@ defmodule ChronoMesh.FDPFECTest do
       # Reassemble should fail
       assert {:error, :frame_incomplete} = FDP.reassemble(frame_id)
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
   end
 
@@ -249,7 +299,11 @@ defmodule ChronoMesh.FDPFECTest do
       # So this should not be complete (missing 2 shards, only 1 parity scheme)
       assert FDP.check_complete(frame_id) == false
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
 
     test "recovery works when exactly one data shard is missing" do
@@ -291,7 +345,11 @@ defmodule ChronoMesh.FDPFECTest do
       expected = "test" <> "data" <> "here"
       assert reassembled == expected
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
   end
 
@@ -334,7 +392,11 @@ defmodule ChronoMesh.FDPFECTest do
       assert FDP.check_complete(frame_id) == false
       assert {:error, :frame_incomplete} = FDP.reassemble(frame_id)
 
-      Process.exit(fdp_pid, :normal)
+      try do
+        GenServer.stop(fdp_pid)
+      rescue
+        ArgumentError -> :ok
+      end
     end
   end
 end

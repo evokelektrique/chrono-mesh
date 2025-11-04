@@ -886,7 +886,7 @@ defmodule ChronoMesh.AddressBook do
     subscriber_node_id <> subscribed_nodes_binary <> <<timestamp::64>> <> <<expires_at::64>>
   end
 
-  defp rate_limit_exceeded?(subscriber_node_id, config \\ nil) do
+  defp rate_limit_exceeded?(subscriber_node_id, config) do
     case :ets.lookup(@rate_limit_table, subscriber_node_id) do
       [{^subscriber_node_id, last_publish_time}] ->
         now = now_ms()
@@ -914,7 +914,7 @@ defmodule ChronoMesh.AddressBook do
     end
   end
 
-  defp alias_rate_limit_exceeded?(alias, config \\ nil) do
+  defp alias_rate_limit_exceeded?(alias, config) do
     case :ets.lookup(@alias_rate_limit_table, alias) do
       [{^alias, last_publish_time}] ->
         now = now_ms()
