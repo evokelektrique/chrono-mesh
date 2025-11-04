@@ -57,9 +57,6 @@ defmodule ChronoMesh.ClientActions do
       parity_ratio = fec_parity_ratio(config)
       min_parity_shards = fec_min_parity_shards(config)
 
-      # Check if AEAD is enabled
-      aead_enabled = aead_enabled?(config)
-
       shard_size = shard_payload_size(config)
       plaintext = IO.iodata_to_binary(message <> "\n")
       data_chunks = chunk_binary(plaintext, shard_size)
@@ -88,13 +85,9 @@ defmodule ChronoMesh.ClientActions do
           {tokens, payload_secret} = build_tokens(path, frame_id, shard_index)
           payload_secret = payload_secret || raise "Failed to derive payload secret"
 
-          # Use AEAD if enabled, otherwise standard encryption
+          # Always use ChaCha20-Poly1305 AEAD encryption
           {payload_ciphertext, auth_tag} =
-            if aead_enabled do
-              Token.encrypt_aead(payload_secret, frame_id, shard_index, chunk)
-            else
-              {Token.encrypt_payload(payload_secret, frame_id, shard_index, chunk), nil}
-            end
+            Token.encrypt_aead(payload_secret, frame_id, shard_index, chunk)
 
           %Pulse{
             frame_id: frame_id,
@@ -102,11 +95,10 @@ defmodule ChronoMesh.ClientActions do
             shard_count: total_shard_count,
             token_chain: tokens,
             payload: payload_ciphertext,
+            auth_tag: auth_tag,
             fec_enabled: fec_enabled,
             parity_count: parity_count,
-            data_shard_count: data_shard_count,
-            aead_enabled: aead_enabled,
-            auth_tag: auth_tag
+            data_shard_count: data_shard_count
           }
         end)
 
@@ -118,13 +110,9 @@ defmodule ChronoMesh.ClientActions do
           {tokens, payload_secret} = build_tokens(path, frame_id, shard_index)
           payload_secret = payload_secret || raise "Failed to derive payload secret"
 
-          # Use AEAD if enabled, otherwise standard encryption
+          # Always use ChaCha20-Poly1305 AEAD encryption
           {payload_ciphertext, auth_tag} =
-            if aead_enabled do
-              Token.encrypt_aead(payload_secret, frame_id, shard_index, parity_chunk)
-            else
-              {Token.encrypt_payload(payload_secret, frame_id, shard_index, parity_chunk), nil}
-            end
+            Token.encrypt_aead(payload_secret, frame_id, shard_index, parity_chunk)
 
           %Pulse{
             frame_id: frame_id,
@@ -132,11 +120,10 @@ defmodule ChronoMesh.ClientActions do
             shard_count: total_shard_count,
             token_chain: tokens,
             payload: payload_ciphertext,
+            auth_tag: auth_tag,
             fec_enabled: fec_enabled,
             parity_count: parity_count,
-            data_shard_count: data_shard_count,
-            aead_enabled: aead_enabled,
-            auth_tag: auth_tag
+            data_shard_count: data_shard_count
           }
         end)
 
@@ -407,13 +394,4 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @spec aead_enabled?(map()) :: boolean()
-  defp aead_enabled?(config) do
-    case get_in(config, ["network", "aead_enabled"]) do
-      value when is_boolean(value) -> value
-      value when is_binary(value) ->
-        String.downcase(value) in ["true", "1", "yes"]
-      _ -> false
-    end
-  end
 end

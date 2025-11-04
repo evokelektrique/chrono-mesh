@@ -13,8 +13,7 @@ defmodule ChronoMesh.Config do
     "default_path_length" => 3,
     "pulse_size_bytes" => 1024,
     "listen_port" => 4_000,
-    "listen_host" => "127.0.0.1",
-    "aead_enabled" => false
+    "listen_host" => "127.0.0.1"
   }
 
   @default_address_book %{
@@ -29,6 +28,17 @@ defmodule ChronoMesh.Config do
       "publish_ttl_ms" => :timer.hours(24),
       "publish_rate_limit_ms" => :timer.minutes(1)
     }
+  }
+
+  @default_pdq %{
+    "enabled" => false,
+    "memory_capacity_mb" => 1024,
+    "memory_swap_threshold" => 0.8,
+    "far_future_threshold_waves" => 10,
+    "disk_path" => "data/pdq",
+    "encryption_enabled" => true,
+    "max_disk_size_mb" => 10240,
+    "cleanup_interval_ms" => 300_000
   }
 
   @doc """
@@ -80,6 +90,7 @@ defmodule ChronoMesh.Config do
   defp bootstrap(opts) do
     ensure_dirs!()
     {public_key, private_key} = ChronoMesh.Keys.generate()
+    {ed25519_public_key, ed25519_private_key} = ChronoMesh.Keys.keypair()
     identity_filename = derive_identity_name(opts[:name])
 
     private_key_path =
@@ -88,8 +99,16 @@ defmodule ChronoMesh.Config do
     public_key_path =
       Path.join(keys_dir(), "#{identity_filename}_pk.pem")
 
+    ed25519_private_key_path =
+      Path.join(keys_dir(), "#{identity_filename}_ed25519_sk.pem")
+
+    ed25519_public_key_path =
+      Path.join(keys_dir(), "#{identity_filename}_ed25519_pk.pem")
+
     ChronoMesh.Keys.write_private_key!(private_key_path, private_key)
     ChronoMesh.Keys.write_public_key!(public_key_path, public_key)
+    ChronoMesh.Keys.write_private_key!(ed25519_private_key_path, ed25519_private_key)
+    ChronoMesh.Keys.write_public_key!(ed25519_public_key_path, ed25519_public_key)
 
     network_defaults =
       @default_network
@@ -102,7 +121,9 @@ defmodule ChronoMesh.Config do
       "identity" => %{
         "display_name" => identity_filename,
         "private_key_path" => private_key_path,
-        "public_key_path" => public_key_path
+        "public_key_path" => public_key_path,
+        "ed25519_private_key_path" => ed25519_private_key_path,
+        "ed25519_public_key_path" => ed25519_public_key_path
       },
       "network" => network_defaults,
       "address_book" => address_book_defaults,
@@ -136,6 +157,7 @@ defmodule ChronoMesh.Config do
     config
     |> ensure_network_defaults()
     |> ensure_address_book_defaults()
+    |> ensure_pdq_defaults()
   end
 
   defp normalise(config) when is_map(config) do
@@ -143,6 +165,7 @@ defmodule ChronoMesh.Config do
     |> Map.put_new("peers", [])
     |> ensure_network_defaults()
     |> ensure_address_book_defaults()
+    |> ensure_pdq_defaults()
   end
 
   defp ensure_network_defaults(config) do
@@ -154,7 +177,6 @@ defmodule ChronoMesh.Config do
       |> Map.put_new("pulse_size_bytes", @default_network["pulse_size_bytes"])
       |> Map.put_new("listen_port", default_listen_port())
       |> Map.put_new("listen_host", default_listen_host())
-      |> Map.put_new("aead_enabled", @default_network["aead_enabled"])
 
     Map.put(config, "network", network)
   end
@@ -196,11 +218,28 @@ defmodule ChronoMesh.Config do
     Map.put(config, "address_book", address_book)
   end
 
+  defp ensure_pdq_defaults(config) do
+    pdq =
+      config
+      |> Map.get("pdq", %{})
+      |> Map.put_new("enabled", @default_pdq["enabled"])
+      |> Map.put_new("memory_capacity_mb", @default_pdq["memory_capacity_mb"])
+      |> Map.put_new("memory_swap_threshold", @default_pdq["memory_swap_threshold"])
+      |> Map.put_new("far_future_threshold_waves", @default_pdq["far_future_threshold_waves"])
+      |> Map.put_new("disk_path", @default_pdq["disk_path"])
+      |> Map.put_new("encryption_enabled", @default_pdq["encryption_enabled"])
+      |> Map.put_new("max_disk_size_mb", @default_pdq["max_disk_size_mb"])
+      |> Map.put_new("cleanup_interval_ms", @default_pdq["cleanup_interval_ms"])
+
+    Map.put(config, "pdq", pdq)
+  end
+
   defp encode_yaml(%{} = config) do
     [
       encode_section("identity", config["identity"]),
       encode_section("network", config["network"]),
       encode_section("address_book", config["address_book"]),
+      encode_section("pdq", config["pdq"]),
       encode_peers(config["peers"] || [])
     ]
     |> Enum.reject(&(&1 == ""))
@@ -341,7 +380,7 @@ defmodule ChronoMesh.Config do
 
         parse_lines(rest, acc, new_section, nil, peers)
 
-      section in ["identity", "network"] && String.starts_with?(line, "  ") ->
+      section in ["identity", "network", "pdq"] && String.starts_with?(line, "  ") ->
         {key, value} = parse_kv(trimmed)
         updated = Map.update!(acc, section, &Map.put(&1, key, value))
         parse_lines(rest, updated, section, current_peer, peers)
@@ -403,7 +442,6 @@ defmodule ChronoMesh.Config do
     end
   end
 
-
   defp base_dir do
     System.get_env("CHRONO_MESH_HOME") || System.user_home!()
   end
@@ -435,5 +473,126 @@ defmodule ChronoMesh.Config do
 
   defp default_listen_host do
     System.get_env("CHRONO_MESH_LISTEN_HOST") || @default_network["listen_host"]
+  end
+
+  # PDQ configuration helpers
+
+  @doc """
+  Returns whether PDQ is enabled in the configuration.
+  """
+  @spec pdq_enabled?(map()) :: boolean()
+  def pdq_enabled?(config) do
+    case get_in(config, ["pdq", "enabled"]) do
+      value when is_boolean(value) -> value
+      value when value in ["true", "1", 1] -> true
+      _ -> @default_pdq["enabled"]
+    end
+  end
+
+  @doc """
+  Returns the PDQ memory capacity in bytes.
+  """
+  @spec pdq_memory_capacity_bytes(map()) :: non_neg_integer()
+  def pdq_memory_capacity_bytes(config) do
+    case get_in(config, ["pdq", "memory_capacity_mb"]) do
+      value when is_integer(value) and value > 0 ->
+        value * 1024 * 1024
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {int, _} when int > 0 -> int * 1024 * 1024
+          _ -> @default_pdq["memory_capacity_mb"] * 1024 * 1024
+        end
+
+      _ ->
+        @default_pdq["memory_capacity_mb"] * 1024 * 1024
+    end
+  end
+
+  @doc """
+  Returns the PDQ memory swap threshold (0.0 to 1.0).
+  """
+  @spec pdq_memory_swap_threshold(map()) :: float()
+  def pdq_memory_swap_threshold(config) do
+    case get_in(config, ["pdq", "memory_swap_threshold"]) do
+      value when is_float(value) and value >= 0.0 and value <= 1.0 ->
+        value
+
+      value when is_integer(value) and value >= 0 and value <= 100 ->
+        value / 100.0
+
+      value when is_binary(value) ->
+        case Float.parse(value) do
+          {float, _} when float >= 0.0 and float <= 1.0 -> float
+          {int, _} when int >= 0 and int <= 100 -> int / 100.0
+          _ -> @default_pdq["memory_swap_threshold"]
+        end
+
+      _ ->
+        @default_pdq["memory_swap_threshold"]
+    end
+  end
+
+  @doc """
+  Returns the PDQ far-future threshold in waves.
+  """
+  @spec pdq_far_future_threshold_waves(map()) :: non_neg_integer()
+  def pdq_far_future_threshold_waves(config) do
+    case get_in(config, ["pdq", "far_future_threshold_waves"]) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {int, _} when int > 0 -> int
+          _ -> @default_pdq["far_future_threshold_waves"]
+        end
+
+      _ ->
+        @default_pdq["far_future_threshold_waves"]
+    end
+  end
+
+  @doc """
+  Returns the PDQ disk path.
+  """
+  @spec pdq_disk_path(map()) :: String.t()
+  def pdq_disk_path(config) do
+    case get_in(config, ["pdq", "disk_path"]) do
+      value when is_binary(value) and value != "" -> value
+      _ -> @default_pdq["disk_path"]
+    end
+  end
+
+  @doc """
+  Returns whether PDQ encryption is enabled.
+  """
+  @spec pdq_encryption_enabled?(map()) :: boolean()
+  def pdq_encryption_enabled?(config) do
+    case get_in(config, ["pdq", "encryption_enabled"]) do
+      value when is_boolean(value) -> value
+      value when value in ["true", "1", 1] -> true
+      _ -> @default_pdq["encryption_enabled"]
+    end
+  end
+
+  @doc """
+  Returns the PDQ cleanup interval in milliseconds.
+  """
+  @spec pdq_cleanup_interval_ms(map()) :: non_neg_integer()
+  def pdq_cleanup_interval_ms(config) do
+    case get_in(config, ["pdq", "cleanup_interval_ms"]) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {int, _} when int > 0 -> int
+          _ -> @default_pdq["cleanup_interval_ms"]
+        end
+
+      _ ->
+        @default_pdq["cleanup_interval_ms"]
+    end
   end
 end

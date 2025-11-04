@@ -28,8 +28,17 @@ defmodule ChronoMesh.ControlClient do
   keyed by node_id for efficient routing.
   """
   @spec enqueue_remote(binary(), [Pulse.t()]) :: :ok | {:error, String.t()}
-  def enqueue_remote(node_id, pulses) when is_binary(node_id) and is_list(pulses) do
+  def enqueue_remote(node_id, pulses)
+      when is_binary(node_id) and byte_size(node_id) == 32 and is_list(pulses) do
     send_to_node(node_id, pulses)
+  end
+
+  def enqueue_remote(node_id, _pulses) when is_binary(node_id) do
+    {:error, "Invalid node_id size: expected 32 bytes, got #{byte_size(node_id)}"}
+  end
+
+  def enqueue_remote(_node_id, _pulses) do
+    {:error, "Invalid node_id: must be a 32-byte binary"}
   end
 
   @spec control_endpoint(map()) :: {String.t(), non_neg_integer()}

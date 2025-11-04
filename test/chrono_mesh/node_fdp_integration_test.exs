@@ -83,14 +83,15 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
       {:ok, {token, shared_secret}} =
         Token.encrypt_token(%{instruction: :deliver}, public_key, frame_id, 0)
 
-      payload_ciphertext = Token.encrypt_payload(shared_secret, frame_id, 0, plaintext)
+      {payload_ciphertext, auth_tag} = Token.encrypt_aead(shared_secret, frame_id, 0, plaintext)
 
       pulse = %Pulse{
         frame_id: frame_id,
         shard_index: 0,
         shard_count: 1,
         token_chain: [token],
-        payload: payload_ciphertext
+        payload: payload_ciphertext,
+        auth_tag: auth_tag
       }
 
       Node.enqueue(pulse)
@@ -123,15 +124,16 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
       {:ok, {token2, shared2}} =
         Token.encrypt_token(%{instruction: :deliver}, public_key, frame_id, 1)
 
-      payload1 = Token.encrypt_payload(shared1, frame_id, 0, shard1)
-      payload2 = Token.encrypt_payload(shared2, frame_id, 1, shard2)
+      {payload1, auth_tag1} = Token.encrypt_aead(shared1, frame_id, 0, shard1)
+      {payload2, auth_tag2} = Token.encrypt_aead(shared2, frame_id, 1, shard2)
 
       pulse1 = %Pulse{
         frame_id: frame_id,
         shard_index: 0,
         shard_count: 2,
         token_chain: [token1],
-        payload: payload1
+        payload: payload1,
+        auth_tag: auth_tag1
       }
 
       pulse2 = %Pulse{
@@ -139,7 +141,8 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
         shard_index: 1,
         shard_count: 2,
         token_chain: [token2],
-        payload: payload2
+        payload: payload2,
+        auth_tag: auth_tag2
       }
 
       # Enqueue first shard
@@ -190,7 +193,7 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
       {:ok, {token, shared}} =
         Token.encrypt_token(%{instruction: :deliver}, public_key, frame_id, 0)
 
-      payload = Token.encrypt_payload(shared, frame_id, 0, shard1)
+      {payload, auth_tag} = Token.encrypt_aead(shared, frame_id, 0, shard1)
 
       pulse = %Pulse{
         frame_id: frame_id,
@@ -198,7 +201,8 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
         # Need 3 shards but only sending 1
         shard_count: 3,
         token_chain: [token],
-        payload: payload
+        payload: payload,
+        auth_tag: auth_tag
       }
 
       Node.enqueue(pulse)
@@ -245,7 +249,7 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
       {:ok, {token, shared}} =
         Token.encrypt_token(%{instruction: :deliver}, public_key, frame_id, 0)
 
-      payload = Token.encrypt_payload(shared, frame_id, 0, "Only one shard")
+      {payload, auth_tag} = Token.encrypt_aead(shared, frame_id, 0, "Only one shard")
 
       pulse = %Pulse{
         frame_id: frame_id,
@@ -253,7 +257,8 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
         # Incomplete
         shard_count: 3,
         token_chain: [token],
-        payload: payload
+        payload: payload,
+        auth_tag: auth_tag
       }
 
       Node.enqueue(pulse)
@@ -294,15 +299,16 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
       {:ok, {token2, shared2}} =
         Token.encrypt_token(%{instruction: :deliver}, public_key, frame_id, 1)
 
-      payload1 = Token.encrypt_payload(shared1, frame_id, 0, "Part1")
-      payload2 = Token.encrypt_payload(shared2, frame_id, 1, "Part2")
+      {payload1, auth_tag1} = Token.encrypt_aead(shared1, frame_id, 0, "Part1")
+      {payload2, auth_tag2} = Token.encrypt_aead(shared2, frame_id, 1, "Part2")
 
       pulse1 = %Pulse{
         frame_id: frame_id,
         shard_index: 0,
         shard_count: 2,
         token_chain: [token1],
-        payload: payload1
+        payload: payload1,
+        auth_tag: auth_tag1
       }
 
       pulse2 = %Pulse{
@@ -310,7 +316,8 @@ defmodule ChronoMesh.NodeFDPIntegrationTest do
         shard_index: 1,
         shard_count: 2,
         token_chain: [token2],
-        payload: payload2
+        payload: payload2,
+        auth_tag: auth_tag2
       }
 
       Node.enqueue(pulse1)

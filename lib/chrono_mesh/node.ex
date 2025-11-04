@@ -349,24 +349,19 @@ defmodule ChronoMesh.Node do
 
   @spec deliver_pulse(Pulse.t(), binary(), state()) :: state()
   defp deliver_pulse(%Pulse{} = pulse, shared_secret, state) do
-    # Check if AEAD is enabled and auth_tag is present
+    # Always use ChaCha20-Poly1305 AEAD decryption
+    # Verify auth_tag size (must be 16 bytes for Poly1305)
     decrypt_result =
-      if pulse.aead_enabled && pulse.auth_tag != nil do
-        # Verify auth_tag size (must be 16 bytes for Poly1305)
-        if byte_size(pulse.auth_tag) == 16 do
-          Token.decrypt_aead(
-            shared_secret,
-            pulse.frame_id,
-            pulse.shard_index,
-            pulse.payload,
-            pulse.auth_tag
-          )
-        else
-          {:error, :invalid_auth_tag}
-        end
+      if byte_size(pulse.auth_tag) == 16 do
+        Token.decrypt_aead(
+          shared_secret,
+          pulse.frame_id,
+          pulse.shard_index,
+          pulse.payload,
+          pulse.auth_tag
+        )
       else
-        # Standard decryption (non-AEAD)
-        Token.decrypt_payload(shared_secret, pulse.frame_id, pulse.shard_index, pulse.payload)
+        {:error, :invalid_auth_tag}
       end
 
     case decrypt_result do

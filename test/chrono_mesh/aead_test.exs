@@ -218,8 +218,8 @@ defmodule ChronoMesh.AEADTest do
     end
   end
 
-  describe "backward compatibility with standard encryption" do
-    test "standard encrypt_payload and decrypt_payload still work" do
+  describe "encrypt_payload/decrypt_payload API (concatenated format)" do
+    test "encrypt_payload and decrypt_payload use AEAD (concatenated format)" do
       shared_secret = :crypto.strong_rand_bytes(32)
       frame_id = :crypto.strong_rand_bytes(16)
       shard_index = 0
@@ -233,26 +233,30 @@ defmodule ChronoMesh.AEADTest do
       assert decrypted == plaintext
     end
 
-    test "AEAD and standard encryption produce different ciphertexts" do
+    test "encrypt_payload returns concatenated format (ciphertext + auth_tag)" do
       shared_secret = :crypto.strong_rand_bytes(32)
       frame_id = :crypto.strong_rand_bytes(16)
       shard_index = 0
       plaintext = "Hello, ChronoMesh!"
 
-      standard_ciphertext = Token.encrypt_payload(shared_secret, frame_id, shard_index, plaintext)
-      {aead_ciphertext, auth_tag} = Token.encrypt_aead(shared_secret, frame_id, shard_index, plaintext)
+      # encrypt_payload returns ciphertext + auth_tag concatenated
+      concatenated = Token.encrypt_payload(shared_secret, frame_id, shard_index, plaintext)
 
-      # Ciphertexts should be different (different modes)
-      assert standard_ciphertext != aead_ciphertext
+      # encrypt_aead returns {ciphertext, auth_tag} tuple
+      {ciphertext, auth_tag} = Token.encrypt_aead(shared_secret, frame_id, shard_index, plaintext)
+
+      # Concatenated format should equal ciphertext + auth_tag
+      expected_concatenated = ciphertext <> auth_tag
+      assert concatenated == expected_concatenated
 
       # Both should decrypt correctly
-      assert {:ok, decrypted_standard} =
-               Token.decrypt_payload(shared_secret, frame_id, shard_index, standard_ciphertext)
+      assert {:ok, decrypted_concatenated} =
+               Token.decrypt_payload(shared_secret, frame_id, shard_index, concatenated)
 
       assert {:ok, decrypted_aead} =
-               Token.decrypt_aead(shared_secret, frame_id, shard_index, aead_ciphertext, auth_tag)
+               Token.decrypt_aead(shared_secret, frame_id, shard_index, ciphertext, auth_tag)
 
-      assert decrypted_standard == plaintext
+      assert decrypted_concatenated == plaintext
       assert decrypted_aead == plaintext
     end
   end

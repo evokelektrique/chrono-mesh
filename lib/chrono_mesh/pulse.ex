@@ -6,18 +6,17 @@ defmodule ChronoMesh.Pulse do
   recovery from lost shards.
   """
 
-  @enforce_keys [:frame_id, :shard_index, :shard_count, :token_chain, :payload]
+  @enforce_keys [:frame_id, :shard_index, :shard_count, :token_chain, :payload, :auth_tag]
   defstruct [
     :frame_id,
     :shard_index,
     :shard_count,
     :token_chain,
     :payload,
+    :auth_tag,
     fec_enabled: false,
     parity_count: 0,
-    data_shard_count: 0,
-    aead_enabled: false,
-    auth_tag: nil
+    data_shard_count: 0
   ]
 
   @type t :: %__MODULE__{
@@ -26,10 +25,9 @@ defmodule ChronoMesh.Pulse do
           shard_count: pos_integer(),
           token_chain: [binary()],
           payload: binary(),
+          auth_tag: binary(),
           fec_enabled: boolean(),
           parity_count: non_neg_integer(),
-          data_shard_count: pos_integer(),
-          aead_enabled: boolean(),
-          auth_tag: binary() | nil
+          data_shard_count: pos_integer()
         }
 end

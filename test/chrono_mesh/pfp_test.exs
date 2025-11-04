@@ -1,7 +1,47 @@
 defmodule ChronoMesh.PFPTest do
   use ExUnit.Case, async: false
 
-  alias ChronoMesh.{Keys, PFP}
+  alias ChronoMesh.{Keys, PFP, Node, ControlServer}
+
+  setup do
+    # Only clean up in on_exit to avoid interfering with tests
+    on_exit(fn ->
+      # Clean up after test - use exit to avoid blocking
+      cleanup_process = fn name ->
+        case GenServer.whereis(name) do
+          nil -> :ok
+          pid ->
+            if Process.alive?(pid) do
+              ref = Process.monitor(pid)
+              Process.exit(pid, :normal)
+              receive do
+                {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+              after
+                200 ->
+                  if Process.alive?(pid) do
+                    Process.exit(pid, :kill)
+                    receive do
+                      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+                    after
+                      100 -> :ok
+                    end
+                  else
+                    :ok
+                  end
+              end
+            else
+              :ok
+            end
+        end
+      end
+
+      cleanup_process.(Node)
+      cleanup_process.(ControlServer)
+      Process.sleep(50)
+    end)
+
+    :ok
+  end
 
   describe "detect_failure/4" do
     test "composes a valid failure notice" do
@@ -289,11 +329,14 @@ defmodule ChronoMesh.PFPTest do
       ed25519_key_path = Path.join(tmp_dir, "test_ed25519_private_key_#{System.unique_integer([:positive])}.pem")
       Keys.write_private_key!(ed25519_key_path, ed25519_private_key_for_node)
 
+      # Use a unique port to avoid conflicts
+      unique_port = 4000 + :rand.uniform(1000)
+
       # Start a node process
       config = %{
         "network" => %{
           "listen_host" => "127.0.0.1",
-          "listen_port" => 4000,
+          "listen_port" => unique_port,
           "wave_duration_secs" => 10
         },
         "identity" => %{
@@ -302,7 +345,29 @@ defmodule ChronoMesh.PFPTest do
         }
       }
 
-      {:ok, _node_pid} = ChronoMesh.Node.start_link(config)
+      # Retry if port is in use
+      case ChronoMesh.Node.start_link(config) do
+        {:ok, _node_pid} ->
+          :ok
+
+        {:error, {:already_started, existing_pid}} ->
+          GenServer.stop(existing_pid, :normal, 5000)
+          Process.sleep(100)
+          {:ok, _node_pid} = ChronoMesh.Node.start_link(config)
+
+        {:error, {:stop, :eaddrinuse}} ->
+          # Port conflict - try another port
+          unique_port2 = unique_port + 1
+          config2 = put_in(config, ["network", "listen_port"], unique_port2)
+
+          case ChronoMesh.Node.start_link(config2) do
+            {:ok, _node_pid} -> :ok
+            other -> raise "Failed to start node even with different port: #{inspect(other)}"
+          end
+
+        {:error, reason} ->
+          raise "Failed to start node: #{inspect(reason)}"
+      end
 
       frame_id = :crypto.strong_rand_bytes(16)
       failed_node_id = :crypto.strong_rand_bytes(32)
@@ -322,8 +387,7 @@ defmodule ChronoMesh.PFPTest do
 
       assert PFP.send_failure_notice(failure_notice, path, config) == :ok
 
-      # Cleanup
-      GenServer.stop(ChronoMesh.Node)
+      # File cleanup only - process cleanup handled by on_exit
       File.rm(key_path)
       File.rm(ed25519_key_path)
     end
