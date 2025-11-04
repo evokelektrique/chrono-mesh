@@ -41,6 +41,12 @@ defmodule ChronoMesh.Config do
     "cleanup_interval_ms" => 300_000
   }
 
+  @default_cover_traffic %{
+    "enabled" => true,
+    "min_pulses_per_wave" => 2,
+    "strategy" => "constant"
+  }
+
   @doc """
   Returns `{config_map, created?}`.
   """
@@ -306,6 +312,7 @@ defmodule ChronoMesh.Config do
     |> ensure_network_defaults()
     |> ensure_address_book_defaults()
     |> ensure_pdq_defaults()
+    |> ensure_cover_traffic_defaults()
   end
 
   defp normalise(config) when is_map(config) do
@@ -314,6 +321,7 @@ defmodule ChronoMesh.Config do
     |> ensure_network_defaults()
     |> ensure_address_book_defaults()
     |> ensure_pdq_defaults()
+    |> ensure_cover_traffic_defaults()
   end
 
   defp ensure_network_defaults(config) do
@@ -380,6 +388,17 @@ defmodule ChronoMesh.Config do
       |> Map.put_new("cleanup_interval_ms", @default_pdq["cleanup_interval_ms"])
 
     Map.put(config, "pdq", pdq)
+  end
+
+  defp ensure_cover_traffic_defaults(config) do
+    cover_traffic =
+      config
+      |> Map.get("cover_traffic", %{})
+      |> Map.put_new("enabled", @default_cover_traffic["enabled"])
+      |> Map.put_new("min_pulses_per_wave", @default_cover_traffic["min_pulses_per_wave"])
+      |> Map.put_new("strategy", @default_cover_traffic["strategy"])
+
+    Map.put(config, "cover_traffic", cover_traffic)
   end
 
   defp encode_yaml(%{} = config) do

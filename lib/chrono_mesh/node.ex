@@ -399,12 +399,16 @@ defmodule ChronoMesh.Node do
     # Merge memory and disk batches
     combined_batch = batch ++ disk_batch
 
-    if combined_batch != [] do
+    # Add cover traffic (dummy pulses) for anonymity
+    dummy_pulses = ChronoMesh.CoverTraffic.generate_for_wave(state.config, state.local_node_id, length(combined_batch))
+    final_batch = combined_batch ++ dummy_pulses
+
+    if final_batch != [] do
       Logger.debug(
-        "Dispatching #{length(combined_batch)} pulses for wave #{wave} (#{length(batch)} from memory, #{length(disk_batch)} from disk)"
+        "Dispatching #{length(final_batch)} pulses for wave #{wave} (#{length(batch)} from memory, #{length(disk_batch)} from disk, #{length(dummy_pulses)} dummy)"
       )
 
-      combined_batch
+      final_batch
       |> Enum.shuffle()
       |> Enum.each(fn {pulse, node_id} -> forward_pulse(pulse, node_id, state) end)
     else
