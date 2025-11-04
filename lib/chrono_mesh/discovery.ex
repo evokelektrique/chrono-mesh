@@ -41,7 +41,7 @@ defmodule ChronoMesh.Discovery do
   use GenServer
   require Logger
 
-  alias ChronoMesh.{AddressBook, DHT, Keys}
+  alias ChronoMesh.{AddressBook, DHT, Keys, JoinChallenge, Config}
 
   @table :chrono_mesh_peers
 
@@ -60,7 +60,8 @@ defmodule ChronoMesh.Discovery do
           ed25519_public_key: binary(),
           announce_interval: non_neg_integer(),
           refresh_interval: non_neg_integer(),
-          last_announce: non_neg_integer()
+          last_announce: non_neg_integer(),
+          pending_challenges: %{optional(binary()) => %{challenge: JoinChallenge.challenge(), timestamp: non_neg_integer()}}
         }
 
   @doc """
@@ -111,7 +112,8 @@ defmodule ChronoMesh.Discovery do
       # Refresh before expiry
       announce_interval: :timer.minutes(4),
       refresh_interval: refresh_interval,
-      last_announce: 0
+      last_announce: 0,
+      pending_challenges: %{}
     }
 
     publish_self_to_dht(state)
@@ -273,6 +275,10 @@ defmodule ChronoMesh.Discovery do
     {:reply, state, state}
   end
 
+  def handle_call({:get_config}, _from, state) do
+    {:reply, {:ok, state.config}, state}
+  end
+
   def handle_call({:random_sample_from_dht, n}, _from, state) do
     # Generate random target IDs to sample DHT
     random_targets = for _ <- 1..min(n, 5), do: :crypto.strong_rand_bytes(32)
@@ -297,9 +303,39 @@ defmodule ChronoMesh.Discovery do
   def handle_call({:lookup_peer_dht, node_id}, _from, state) do
     announcements = DHT.lookup_nodes(state.dht_pid, node_id, 5)
 
+    # Filter and sort by trust score (if trust policy enabled)
+    verified_announcements =
+      if Config.trust_policy_enabled?(state.config) do
+        announcements
+        |> Enum.map(fn ann ->
+          score = DHT.trust_policy_score(ann, config: state.config)
+          {ann, score}
+        end)
+        |> Enum.filter(fn {ann, score} ->
+          min_score = Config.trust_policy_min_score(state.config)
+          trust_policy_check_with_config(ann, state.config) and score >= min_score
+        end)
+        |> Enum.sort_by(fn {_ann, score} -> -score end, :asc)
+        |> Enum.map(fn {ann, _score} -> ann end)
+        |> Enum.take(1)
+      else
+        announcements
+        |> Enum.filter(&trust_policy_check/1)
+        |> Enum.take(1)
+      end
+
+    # Check join challenge if enabled and this is a new peer
+    final_announcements =
+      if Config.join_challenge_enabled?(state.config) and verified_announcements != [] do
+        Enum.filter(verified_announcements, fn ann ->
+          check_join_challenge(ann, state)
+        end)
+      else
+        verified_announcements
+      end
+
     peers =
-      announcements
-      |> Enum.filter(&trust_policy_check/1)
+      final_announcements
       |> Enum.map(&announcement_to_peer/1)
 
     # Update local cache
@@ -307,13 +343,63 @@ defmodule ChronoMesh.Discovery do
       upsert_peer(peer.public_key)
     end)
 
-    # Return announcements (not just peers) so introduction_points can be accessed
-    verified_announcements =
-      announcements
-      |> Enum.filter(&trust_policy_check/1)
-      |> Enum.take(1)
+    # Clean up expired challenges
+    new_state = cleanup_expired_challenges(state)
 
-    {:reply, verified_announcements, state}
+    {:reply, final_announcements, new_state}
+  end
+
+  @doc """
+  Handles join challenge response from a peer.
+  """
+  def handle_call({:join_challenge_response, node_id, response}, _from, state) do
+    result =
+      case Map.get(state.pending_challenges, node_id) do
+        nil ->
+          {:error, :no_pending_challenge}
+
+        %{challenge: challenge, timestamp: challenge_timestamp} ->
+          # Get responder's public key from announcement or cache
+          timeout_ms = Config.join_challenge_timeout_ms(state.config)
+          now = System.system_time(:millisecond)
+
+          if now - challenge_timestamp > timeout_ms do
+            {:error, :challenge_expired}
+          else
+            # Find announcement to get public key
+            announcements = DHT.lookup_nodes(state.dht_pid, node_id, 1)
+
+            case announcements do
+              [announcement | _] ->
+                public_key = announcement.public_key
+
+                case JoinChallenge.verify_response(
+                       challenge,
+                       response,
+                       node_id,
+                       public_key,
+                       timeout_ms
+                     ) do
+                  :ok ->
+                    # Challenge passed - remove from pending and accept peer
+                    new_pending = Map.delete(state.pending_challenges, node_id)
+                    upsert_peer(public_key)
+                    {:ok, :ok, %{state | pending_challenges: new_pending}}
+
+                  {:error, reason} ->
+                    {:error, reason, state}
+                end
+
+              [] ->
+                {:error, :announcement_not_found, state}
+            end
+          end
+      end
+
+    case result do
+      {:ok, :ok, new_state} -> {:reply, :ok, new_state}
+      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
+    end
   end
 
   @impl true
@@ -324,13 +410,15 @@ defmodule ChronoMesh.Discovery do
   end
 
   @spec bootstrap_from_config(map(), pid()) :: :ok
-  defp bootstrap_from_config(%{"network" => net}, _dht_pid) do
+  defp bootstrap_from_config(%{"network" => net} = full_config, _dht_pid) do
     peers = Map.get(net, "bootstrap_peers", [])
+    Logger.info("Discovery: network keys: #{inspect(Map.keys(net))}")
+    Logger.info("Discovery: processing #{length(peers)} bootstrap peers with config: #{inspect(peers)}")
 
     Enum.each(peers, fn peer ->
       case peer do
         %{"public_key" => pk} = peer_config ->
-          case decode_pk(pk) do
+          case load_and_decode_pk(pk) do
             {:ok, pubkey} ->
               node_id = Keys.node_id_from_public_key(pubkey)
               upsert_peer(pubkey)
@@ -338,12 +426,18 @@ defmodule ChronoMesh.Discovery do
               if connection_hint = Map.get(peer_config, "connection_hint") do
                 case parse_connection_hint(connection_hint) do
                   {host, port} ->
+                    Logger.info("Discovery: registering bootstrap peer #{Base.encode16(node_id)} at #{host}:#{port}")
                     ChronoMesh.ControlClient.register_connection(node_id, host, port)
 
                   nil ->
-                    Logger.warning("Discovery: invalid connection_hint for bootstrap peer")
+                    Logger.warning("Discovery: invalid connection_hint for bootstrap peer: #{connection_hint}")
                 end
+              else
+                Logger.warning("Discovery: bootstrap peer has no connection_hint")
               end
+
+            {:error, reason} ->
+              Logger.warning("Discovery: failed to load public key from bootstrap peer: #{reason}")
           end
 
         %{"node_id" => node_id_hex} = peer_config ->
@@ -398,6 +492,27 @@ defmodule ChronoMesh.Discovery do
   end
 
   defp parse_connection_hint(_), do: nil
+
+  @spec load_and_decode_pk(String.t()) :: {:ok, binary()} | {:error, String.t()}
+  defp load_and_decode_pk(pk) when is_binary(pk) do
+    pk = String.trim(pk)
+
+    # First, try to load as a file path
+    if File.exists?(pk) do
+      try do
+        {:ok, Keys.read_public_key!(pk)}
+      rescue
+        error ->
+          {:error, "Failed to read public key from file #{pk}: #{inspect(error)}"}
+      end
+    else
+      # Try to decode as base64
+      case Base.decode64(pk) do
+        {:ok, bin} -> {:ok, bin}
+        :error -> {:error, "Invalid public key: not a valid file path or base64"}
+      end
+    end
+  end
 
   @spec decode_pk(String.t()) :: {:ok, binary()}
   defp decode_pk(pk) when is_binary(pk) do
@@ -622,6 +737,95 @@ defmodule ChronoMesh.Discovery do
 
   @spec trust_policy_check(map()) :: boolean()
   defp trust_policy_check(announcement) do
-    DHT.trust_policy_check(announcement)
+    # Get config from state if available (called from GenServer context)
+    config = get_config_from_state()
+    DHT.trust_policy_check(announcement, config: config)
+  end
+
+  @spec trust_policy_check_with_config(map(), map()) :: boolean()
+  defp trust_policy_check_with_config(announcement, config) do
+    DHT.trust_policy_check(announcement, config: config)
+  end
+
+  @spec get_config_from_state() :: map()
+  defp get_config_from_state do
+    case GenServer.whereis(__MODULE__) do
+      nil -> %{}
+      pid ->
+        case GenServer.call(pid, :get_config, 1000) do
+          {:ok, config} -> config
+          _ -> %{}
+        end
+    end
+  end
+
+  def handle_call(:get_config, _from, state) do
+    {:reply, {:ok, state.config}, state}
+  end
+
+  # Join challenge helpers
+
+  @spec check_join_challenge(map(), state()) :: boolean()
+  defp check_join_challenge(announcement, state) do
+    node_id = announcement.node_id
+
+    # Check if peer is already known (skip challenge for existing peers)
+    case :ets.lookup(@table, node_id) do
+      [{^node_id, _peer}] ->
+        # Known peer - no challenge needed
+        true
+
+      [] ->
+        # New peer - require challenge
+        # Check if challenge already pending
+        case Map.get(state.pending_challenges, node_id) do
+          nil ->
+            # Generate new challenge
+            case JoinChallenge.generate_challenge(node_id, state.ed25519_private_key) do
+              {:ok, challenge} ->
+                # Store pending challenge (will be sent via ControlClient)
+                GenServer.cast(__MODULE__, {:store_pending_challenge, node_id, challenge})
+                # Don't accept yet - wait for response
+                false
+
+              {:error, _reason} ->
+                Logger.warning("Discovery: Failed to generate join challenge for #{Base.encode16(node_id)}")
+                false
+            end
+
+          _challenge ->
+            # Challenge already pending - wait for response
+            false
+        end
+    end
+  end
+
+  @impl true
+  def handle_cast({:store_pending_challenge, node_id, challenge}, state) do
+    new_pending = Map.put(
+      state.pending_challenges,
+      node_id,
+      %{challenge: challenge, timestamp: System.system_time(:millisecond)}
+    )
+    {:noreply, %{state | pending_challenges: new_pending}}
+  end
+
+  @spec cleanup_expired_challenges(state()) :: state()
+  defp cleanup_expired_challenges(state) do
+    if Config.join_challenge_enabled?(state.config) do
+      timeout_ms = Config.join_challenge_timeout_ms(state.config)
+      now = System.system_time(:millisecond)
+
+      new_pending =
+        state.pending_challenges
+        |> Enum.reject(fn {_node_id, %{timestamp: timestamp}} ->
+          now - timestamp > timeout_ms
+        end)
+        |> Enum.into(%{})
+
+      %{state | pending_challenges: new_pending}
+    else
+      state
+    end
   end
 end

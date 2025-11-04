@@ -8,9 +8,10 @@ defmodule ChronoMesh.ControlClient do
 
   require Logger
 
-  alias ChronoMesh.Pulse
+  alias ChronoMesh.{Pulse, JoinChallenge}
 
   @connection_registry :chrono_mesh_connections
+  @authenticated_peers :chrono_mesh_authenticated_peers
 
   @doc """
   Enqueues pulses on the locally configured node via TCP control port.
@@ -225,13 +226,13 @@ defmodule ChronoMesh.ControlClient do
       {:ok, socket} ->
         # Set send timeout
         :ok = :inet.setopts(socket, send_timeout: timeout)
+
+        # Send pulses (join challenge handshake would be implemented in full version)
         result = :gen_tcp.send(socket, payload)
         :ok = :gen_tcp.close(socket)
 
         case result do
-          :ok ->
-            :ok
-
+          :ok -> :ok
           {:error, reason} ->
             Logger.error("Control client failed to send to #{host}:#{port} -> #{inspect(reason)}")
             {:error, "Unable to send to node #{host}:#{port} (#{inspect(reason)})"}
@@ -245,5 +246,55 @@ defmodule ChronoMesh.ControlClient do
         Logger.error("Control client failed to connect to #{host}:#{port} -> #{inspect(reason)}")
         {:error, "Unable to reach node #{host}:#{port} (#{inspect(reason)})"}
     end
+  end
+
+  @spec handle_connection_with_challenge(port(), String.t(), non_neg_integer(), binary(), non_neg_integer()) :: :ok | {:error, String.t()}
+  defp handle_connection_with_challenge(socket, _host, _port, payload, timeout) do
+    # For now, send accept message first (legacy mode)
+    # In full implementation, would check for challenge from server
+    accept_payload = :erlang.term_to_binary({:accept})
+
+    case :gen_tcp.send(socket, accept_payload) do
+      :ok ->
+        # Wait for server response (could be challenge or accept)
+        case :gen_tcp.recv(socket, 0, timeout) do
+          {:ok, data} ->
+            case :erlang.binary_to_term(data, [:safe]) do
+              {:join_challenge, challenge} ->
+                # Respond to challenge
+                handle_challenge_response(socket, challenge, payload, timeout)
+
+              {:accept} ->
+                # Already authenticated - send pulses
+                :gen_tcp.send(socket, payload)
+
+              _other ->
+                # Legacy: assume server is ready for pulses
+                :gen_tcp.send(socket, payload)
+            end
+
+          {:error, reason} ->
+            {:error, "Failed to receive server response: #{inspect(reason)}"}
+        end
+
+      {:error, reason} ->
+        {:error, "Failed to send accept: #{inspect(reason)}"}
+    end
+  end
+
+  @spec handle_challenge_response(port(), JoinChallenge.challenge(), binary(), non_neg_integer()) :: :ok | {:error, String.t()}
+  defp handle_challenge_response(_socket, _challenge, _payload, _timeout) do
+    # Placeholder implementation - in full implementation would:
+    # 1. Get local Ed25519 private key from config
+    # 2. Create response using JoinChallenge.create_response
+    # 3. Send response
+    # 4. Wait for acceptance
+    # 5. Send pulses
+
+    Logger.debug("Control client: Received join challenge (placeholder - not fully implemented)")
+
+    # For now, just send pulses (backward compatibility)
+    # In full implementation, this would require passing config to send_to
+    {:error, "Join challenge not fully implemented - requires config context"}
   end
 end

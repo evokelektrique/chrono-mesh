@@ -121,7 +121,8 @@ defmodule ChronoMesh.DHT do
           signature: binary(),
           introduction_points: [introduction_point()],
           nonce: binary(),
-          ed25519_public_key: binary()
+          ed25519_public_key: binary(),
+          challenge_completed: boolean() | nil
         }
 
   @typedoc "DHT state"
@@ -177,7 +178,8 @@ defmodule ChronoMesh.DHT do
   Put a key/value pair into the DHT with a custom TTL.
   """
   @spec put(pid(), binary(), binary(), non_neg_integer()) :: :ok
-  def put(pid, key, value, ttl_ms) when is_binary(key) and is_binary(value) and is_integer(ttl_ms) and ttl_ms > 0 do
+  def put(pid, key, value, ttl_ms)
+      when is_binary(key) and is_binary(value) and is_integer(ttl_ms) and ttl_ms > 0 do
     GenServer.call(pid, {:put, key, value, ttl_ms})
   end
 
@@ -208,8 +210,14 @@ defmodule ChronoMesh.DHT do
   No IP addresses are stored in the announcement itself - nodes are identified solely by cryptographic identifiers.
   Introduction points provide anonymous connection establishment via rendezvous nodes.
   """
-  @spec announce_node(pid(), binary(), binary(), non_neg_integer(), [introduction_point()],
-          keyword()) ::
+  @spec announce_node(
+          pid(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          [introduction_point()],
+          keyword()
+        ) ::
           :ok | {:error, term()}
   def announce_node(
         pid,
@@ -224,8 +232,8 @@ defmodule ChronoMesh.DHT do
 
     GenServer.call(
       pid,
-      {:announce_node, public_key, private_key, ttl_ms, introduction_points,
-       ed25519_public_key, ed25519_private_key}
+      {:announce_node, public_key, private_key, ttl_ms, introduction_points, ed25519_public_key,
+       ed25519_private_key, opts}
     )
   end
 
@@ -330,7 +338,7 @@ defmodule ChronoMesh.DHT do
 
   def handle_call(
         {:announce_node, public_key, _private_key, ttl_ms, introduction_points,
-         ed25519_public_key, ed25519_private_key},
+         ed25519_public_key, ed25519_private_key, opts},
         _from,
         state
       ) do
@@ -339,6 +347,9 @@ defmodule ChronoMesh.DHT do
              is_binary(ed25519_private_key) and byte_size(ed25519_private_key) == 32 do
       raise ArgumentError, "ed25519_public_key and ed25519_private_key must be 32-byte binaries"
     end
+
+    # Get challenge_completed from opts
+    challenge_completed = Keyword.get(opts || [], :challenge_completed, nil)
 
     node_id = ChronoMesh.Keys.node_id_from_public_key(public_key)
     now = now_ms()
@@ -358,7 +369,8 @@ defmodule ChronoMesh.DHT do
         expires_at,
         safe_intro_points,
         nonce,
-        ed25519_public_key
+        ed25519_public_key,
+        challenge_completed
       )
 
     signature = ChronoMesh.Keys.sign(announcement_data, ed25519_private_key)
@@ -371,7 +383,8 @@ defmodule ChronoMesh.DHT do
       signature: signature,
       introduction_points: safe_intro_points,
       nonce: nonce,
-      ed25519_public_key: ed25519_public_key
+      ed25519_public_key: ed25519_public_key,
+      challenge_completed: challenge_completed
     }
 
     # Store announcement in DHT using node_id as key
@@ -669,9 +682,18 @@ defmodule ChronoMesh.DHT do
 
   # Announcement helpers --------------------------------------------------------
 
-  @spec encode_announcement(node_id(), binary(), non_neg_integer(), non_neg_integer(), [
-          introduction_point()
-        ], binary(), binary() | nil) ::
+  @spec encode_announcement(
+          node_id(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          [
+            introduction_point()
+          ],
+          binary(),
+          binary() | nil,
+          boolean() | nil
+        ) ::
           binary()
   defp encode_announcement(
          node_id,
@@ -680,12 +702,15 @@ defmodule ChronoMesh.DHT do
          expires_at,
          introduction_points,
          nonce,
-         ed25519_public_key
+         ed25519_public_key,
+         challenge_completed \\ nil
        ) do
     intro_points = introduction_points || []
     ed25519_pub = ed25519_public_key || <<>>
+    challenge = challenge_completed || false
+
     :erlang.term_to_binary(
-      {node_id, public_key, timestamp, expires_at, intro_points, nonce, ed25519_pub}
+      {node_id, public_key, timestamp, expires_at, intro_points, nonce, ed25519_pub, challenge}
     )
   end
 
@@ -705,7 +730,8 @@ defmodule ChronoMesh.DHT do
           announcement.expires_at,
           announcement.introduction_points || [],
           announcement.nonce,
-          announcement.ed25519_public_key
+          announcement.ed25519_public_key,
+          Map.get(announcement, :challenge_completed, nil)
         )
 
       # Ed25519 verification
@@ -891,16 +917,105 @@ defmodule ChronoMesh.DHT do
 
   # Trust policy hooks -----------------------------------------------------------
 
+  @trust_scores_table :chrono_mesh_trust_scores
+
   @doc """
   Callback for trust policy checks. Returns `true` by default.
   Can be overridden to implement custom trust logic.
   """
   @spec trust_policy_check(announcement(), keyword()) :: boolean()
-  def trust_policy_check(announcement, _opts \\ []) do
-    # Default: accept all verified announcements
-    # Can be extended with trust scoring, blacklists, etc.
-    # Note: Replay protection is handled in verify_announcement_with_state
-    verify_announcement(announcement)
+  def trust_policy_check(announcement, opts \\ []) do
+    # First verify the announcement signature
+    if verify_announcement(announcement) do
+      # If trust policy is enabled, check trust score
+      config = Keyword.get(opts, :config, %{})
+
+      if ChronoMesh.Config.trust_policy_enabled?(config) do
+        min_score = ChronoMesh.Config.trust_policy_min_score(config)
+        trust_score = trust_policy_score(announcement, opts)
+        trust_score >= min_score
+      else
+        true
+      end
+    else
+      false
+    end
+  end
+
+  @doc """
+  Gets the trust score for a node announcement.
+
+  Returns a float between 0.0 (untrusted) and 1.0 (fully trusted).
+  Uses TrustPolicy module to get scores, with caching in ETS table.
+  """
+  @spec trust_policy_score(announcement(), keyword()) :: float()
+  def trust_policy_score(announcement, opts \\ []) do
+    ensure_trust_scores_table()
+    node_id = announcement.node_id
+
+    # Check cache first
+    case :ets.lookup(@trust_scores_table, node_id) do
+      [{^node_id, score, cached_at}] ->
+        # Cache valid for 5 minutes
+        now = System.system_time(:millisecond)
+
+        if now - cached_at < 300_000 do
+          score
+        else
+          # Cache expired, refresh
+          refresh_trust_score(node_id, announcement, opts)
+        end
+
+      [] ->
+        # Not cached, calculate and store
+        refresh_trust_score(node_id, announcement, opts)
+    end
+  end
+
+  @spec refresh_trust_score(binary(), announcement(), keyword()) :: float()
+  defp refresh_trust_score(node_id, _announcement, opts) do
+    config = Keyword.get(opts, :config, %{})
+
+    # Get trust score from TrustPolicy module
+    module_name = get_in(config, ["trust_policy", "module"]) || "ChronoMesh.TrustPolicy.Default"
+
+    module =
+      try do
+        String.to_existing_atom("Elixir." <> module_name)
+      rescue
+        ArgumentError ->
+          case Code.string_to_quoted(module_name) do
+            {:ok, {:__aliases__, _, parts}} -> Module.concat([Elixir | parts])
+            _ -> nil
+          end
+      end
+
+    score =
+      if module != nil and Code.ensure_loaded?(module) and
+           function_exported?(module, :get_trust_score, 1) do
+        module.get_trust_score(node_id)
+      else
+        # Fallback to default trust policy
+        ChronoMesh.TrustPolicy.get_trust_score(node_id)
+      end
+
+    # Cache the score
+    now = System.system_time(:millisecond)
+    :ets.insert(@trust_scores_table, {node_id, score, now})
+
+    score
+  end
+
+  @spec ensure_trust_scores_table() :: :ok
+  defp ensure_trust_scores_table do
+    case :ets.whereis(@trust_scores_table) do
+      :undefined ->
+        :ets.new(@trust_scores_table, [:set, :public, :named_table, read_concurrency: true])
+        :ok
+
+      _ ->
+        :ok
+    end
   end
 
   # Transport (in-VM registry) -----------------------------------------------

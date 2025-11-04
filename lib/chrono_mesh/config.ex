@@ -48,7 +48,9 @@ defmodule ChronoMesh.Config do
   def ensure(opts \\ []) do
     with {:ok, yaml} <- File.read(config_file()),
          {:ok, data} <- decode_yaml(yaml) do
-      {normalise(data), false}
+      # Patch bootstrap_peers if they're in the raw YAML but not parsed
+      data_with_bootstrap = load_bootstrap_peers_from_yaml(yaml, data)
+      {normalise(data_with_bootstrap), false}
     else
       {:error, :enoent} ->
         path = config_file()
@@ -60,6 +62,152 @@ defmodule ChronoMesh.Config do
       {:error, reason} ->
         raise "Failed to load config: #{inspect(reason)}"
     end
+  end
+
+  # Parse bootstrap_peers and peers from raw YAML content
+  @spec load_bootstrap_peers_from_yaml(String.t(), map()) :: map()
+  defp load_bootstrap_peers_from_yaml(yaml_content, config) do
+    config
+    |> load_peers_from_yaml(yaml_content)
+    |> load_bootstrap_peers_from_yaml_helper(yaml_content)
+  end
+
+  @spec load_bootstrap_peers_from_yaml_helper(map(), String.t()) :: map()
+  defp load_bootstrap_peers_from_yaml_helper(config, yaml_content) do
+    case parse_bootstrap_peers_from_yaml(yaml_content) do
+      [] ->
+        config
+
+      bootstrap_peers when is_list(bootstrap_peers) ->
+        network = Map.get(config, "network", %{})
+        updated_network = Map.put(network, "bootstrap_peers", bootstrap_peers)
+        Map.put(config, "network", updated_network)
+    end
+  end
+
+  @spec load_peers_from_yaml(map(), String.t()) :: map()
+  defp load_peers_from_yaml(config, yaml_content) do
+    case parse_peers_from_yaml(yaml_content) do
+      [] ->
+        config
+
+      peers when is_list(peers) ->
+        Map.put(config, "peers", peers)
+    end
+  end
+
+  # Extract bootstrap_peers list from raw YAML using string parsing
+  @spec parse_bootstrap_peers_from_yaml(String.t()) :: [map()]
+  defp parse_bootstrap_peers_from_yaml(yaml_content) do
+    lines = String.split(yaml_content, "\n")
+
+    lines
+    |> Enum.reduce({[], false, nil}, fn line, {acc, in_bootstrap, current_peer} ->
+      trimmed = String.trim(line)
+
+      cond do
+        trimmed == "bootstrap_peers:" ->
+          # Start of bootstrap_peers section
+          {acc, true, nil}
+
+        in_bootstrap && String.starts_with?(trimmed, "- ") ->
+          # New bootstrap peer item
+          kv_str = String.trim_leading(trimmed, "- ") |> String.trim()
+
+          case parse_kv_safe(kv_str) do
+            {key, value} ->
+              new_peer = %{key => value}
+              {[new_peer | acc], in_bootstrap, new_peer}
+
+            nil ->
+              {acc, in_bootstrap, nil}
+          end
+
+        in_bootstrap && current_peer != nil && String.starts_with?(line, "    ") && !String.starts_with?(trimmed, "-") ->
+          # Continuation of current peer (4-space indented)
+          case parse_kv_safe(trimmed) do
+            {key, value} ->
+              updated_peer = Map.put(current_peer, key, value)
+              updated_acc = [updated_peer | tl(acc)]
+              {updated_acc, in_bootstrap, updated_peer}
+
+            nil ->
+              {acc, in_bootstrap, current_peer}
+          end
+
+        in_bootstrap && trimmed != "" && !String.starts_with?(line, "  ") ->
+          # End of bootstrap_peers section (dedented line)
+          {acc, false, nil}
+
+        true ->
+          {acc, in_bootstrap, current_peer}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  # Safe version of parse_kv that doesn't raise
+  @spec parse_kv_safe(String.t()) :: {String.t(), String.t()} | nil
+  defp parse_kv_safe(line) do
+    case String.split(line, ":", parts: 2) do
+      [key, value] ->
+        {String.trim(key), String.trim(value) |> strip_quotes()}
+
+      _ ->
+        nil
+    end
+  end
+
+  # Parse peers list from raw YAML
+  @spec parse_peers_from_yaml(String.t()) :: [map()]
+  defp parse_peers_from_yaml(yaml_content) do
+    lines = String.split(yaml_content, "\n")
+
+    lines
+    |> Enum.reduce({[], false, nil}, fn line, {acc, in_peers, current_peer} ->
+      trimmed = String.trim(line)
+
+      cond do
+        trimmed == "peers:" ->
+          # Start of peers section
+          {acc, true, nil}
+
+        in_peers && String.starts_with?(trimmed, "- ") ->
+          # New peer item
+          kv_str = String.trim_leading(trimmed, "- ") |> String.trim()
+
+          case parse_kv_safe(kv_str) do
+            {key, value} ->
+              new_peer = %{key => value}
+              {[new_peer | acc], in_peers, new_peer}
+
+            nil ->
+              {acc, in_peers, nil}
+          end
+
+        in_peers && current_peer != nil && String.starts_with?(line, "  ") && !String.starts_with?(trimmed, "-") ->
+          # Continuation of current peer (2-space indented)
+          case parse_kv_safe(trimmed) do
+            {key, value} ->
+              updated_peer = Map.put(current_peer, key, value)
+              updated_acc = [updated_peer | tl(acc)]
+              {updated_acc, in_peers, updated_peer}
+
+            nil ->
+              {acc, in_peers, current_peer}
+          end
+
+        in_peers && trimmed != "" && !String.starts_with?(line, "  ") ->
+          # End of peers section (dedented line)
+          {acc, false, nil}
+
+        true ->
+          {acc, in_peers, current_peer}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
   end
 
   @doc """
@@ -252,6 +400,9 @@ defmodule ChronoMesh.Config do
     # Special handling for address_book nested sections
     if name == "address_book" do
       encode_address_book_section(map)
+    # Special handling for network section with bootstrap_peers
+    else if name == "network" do
+      encode_network_section(map)
     else
       [
         "#{name}:",
@@ -260,6 +411,41 @@ defmodule ChronoMesh.Config do
       |> List.flatten()
       |> Enum.join("\n")
     end
+    end
+  end
+
+  defp encode_network_section(map) do
+    lines = [
+      "network:",
+      map
+      |> Enum.reject(fn {k, _v} -> k == "bootstrap_peers" end)
+      |> Enum.map(fn {k, v} -> "  #{k}: #{yaml_value(v)}" end)
+    ]
+    |> List.flatten()
+
+    lines =
+      if Map.has_key?(map, "bootstrap_peers") && is_list(map["bootstrap_peers"]) do
+        bootstrap_lines = [
+          "  bootstrap_peers:"
+          | Enum.map(map["bootstrap_peers"], fn peer ->
+            [
+              "  - public_key: #{yaml_value(Map.get(peer, "public_key", ""))}"
+              | if Map.has_key?(peer, "connection_hint") do
+                ["    connection_hint: #{yaml_value(Map.get(peer, "connection_hint", ""))}"]
+              else
+                []
+              end
+            ]
+          end)
+          |> List.flatten()
+        ]
+
+        lines ++ bootstrap_lines
+      else
+        lines
+      end
+
+    lines |> Enum.reject(&(&1 == "")) |> Enum.join("\n")
   end
 
   defp encode_address_book_section(map) do
@@ -406,7 +592,8 @@ defmodule ChronoMesh.Config do
         peer = Map.put(%{}, key, value)
         parse_lines(rest, acc, section, peer, [peer | peers])
 
-      section == "peers" && current_peer != nil && String.starts_with?(line, "    ") ->
+      section == "peers" && current_peer != nil && String.starts_with?(line, "  ") && !String.starts_with?(trimmed, "-") ->
+        # Handle both 2-space and 4-space indentation for peer properties
         {key, value} = parse_kv(trimmed)
         updated_peer = Map.put(current_peer, key, value)
         updated_peers = [updated_peer | tl(peers)]
@@ -593,6 +780,30 @@ defmodule ChronoMesh.Config do
 
       _ ->
         @default_pdq["cleanup_interval_ms"]
+    end
+  end
+
+  @doc """
+  Returns whether Ordered Dialogue Protocol (ODP) is enabled.
+  """
+  @spec odp_enabled?(map()) :: boolean()
+  def odp_enabled?(config) do
+    case get_in(config, ["odp", "enabled"]) do
+      value when is_boolean(value) -> value
+      value when value in ["true", "1", 1] -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  Returns whether join challenge is enabled in the configuration.
+  """
+  @spec join_challenge_enabled?(map()) :: boolean()
+  def join_challenge_enabled?(config) do
+    case get_in(config, ["join_challenge", "enabled"]) do
+      value when is_boolean(value) -> value
+      value when value in ["true", "1", 1] -> true
+      _ -> false
     end
   end
 end

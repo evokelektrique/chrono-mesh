@@ -28,6 +28,7 @@ defmodule ChronoMesh.ClientActions do
   alias ChronoMesh.{AddressBook, FEC, Pulse, Token, Keys}
 
   @failed_paths_table :chrono_mesh_failed_paths
+  @odp_sequences_table :chrono_mesh_odp_sequences
 
   @doc """
   Queues a human-readable `message` for delivery to `recipient_name`.
@@ -40,17 +41,29 @@ defmodule ChronoMesh.ClientActions do
   Options:
 
     * `:path_length` — number of intermediate hops (defaults to configuration or `2`).
+    * `:ordered` — whether to use ordered delivery (ODP) (default: false).
+    * `:privacy_tier` — privacy tier ("low", "medium", "high") (default: nil).
   """
   @spec send_message(map(), String.t(), String.t(), keyword()) ::
           :ok | {:error, String.t()}
   def send_message(config, recipient_name, message, opts) do
     peers = config["peers"] || []
+    ordered = opts[:ordered] || false
+    privacy_tier = opts[:privacy_tier]
 
     path_length = opts[:path_length] || default_path_length(config)
 
     with {:ok, recipient} <- resolve_recipient(peers, recipient_name),
          {:ok, path} <- build_path(peers, recipient, path_length) do
       frame_id = :crypto.strong_rand_bytes(16)
+
+      # Generate dialogue_id and sequence_number if ordered delivery is enabled
+      {dialogue_id, sequence_number} =
+        if ordered do
+          generate_odp_metadata(config, recipient.node_id)
+        else
+          {nil, nil}
+        end
 
       # Check if FEC is enabled
       fec_enabled = fec_enabled?(config)
@@ -98,7 +111,10 @@ defmodule ChronoMesh.ClientActions do
             auth_tag: auth_tag,
             fec_enabled: fec_enabled,
             parity_count: parity_count,
-            data_shard_count: data_shard_count
+            data_shard_count: data_shard_count,
+            dialogue_id: dialogue_id,
+            sequence_number: sequence_number,
+            privacy_tier: privacy_tier
           }
         end)
 
@@ -123,14 +139,18 @@ defmodule ChronoMesh.ClientActions do
             auth_tag: auth_tag,
             fec_enabled: fec_enabled,
             parity_count: parity_count,
-            data_shard_count: data_shard_count
+            data_shard_count: data_shard_count,
+            dialogue_id: dialogue_id,
+            sequence_number: sequence_number,
+            privacy_tier: privacy_tier
           }
         end)
 
       # Combine all pulses
       pulses = data_pulses ++ parity_pulses
 
-      send_with_retry(config, pulses, 3)
+      # Enqueue pulses on the local node, which will route them through the path
+      ChronoMesh.ControlClient.enqueue_local(config, pulses)
     else
       {:error, _} = error ->
         error
@@ -180,24 +200,78 @@ defmodule ChronoMesh.ClientActions do
     end
   end
 
-  @spec send_with_retry(map(), [Pulse.t()], pos_integer()) :: :ok | {:error, String.t()}
-  defp send_with_retry(config, pulses, attempts_left) do
-    case ChronoMesh.ControlClient.enqueue_local(config, pulses) do
-      :ok ->
+  @spec ensure_odp_sequences_table() :: :ok
+  defp ensure_odp_sequences_table do
+    case :ets.whereis(@odp_sequences_table) do
+      :undefined ->
+        :ets.new(@odp_sequences_table, [:set, :public, :named_table])
         :ok
 
-      {:error, _reason} when attempts_left > 1 ->
-        Process.sleep(100)
-        send_with_retry(config, pulses, attempts_left - 1)
-
-      {:error, _reason} ->
-        {:error, "send failed after retries"}
+      _ ->
+        :ok
     end
   end
+
+  @spec generate_odp_metadata(map(), binary()) :: {binary(), non_neg_integer()}
+  defp generate_odp_metadata(config, recipient_node_id) do
+    ensure_odp_sequences_table()
+
+    # Get local node_id (sender)
+    local_private_key_path = get_in(config, ["identity", "private_key_path"])
+    local_private_key = Keys.read_private_key!(local_private_key_path)
+
+    # For dialogue_id, use hash of sender+recipient node_ids
+    # Derive sender node_id from public key
+    local_public_key_path = get_in(config, ["identity", "public_key_path"])
+
+    local_public_key =
+      if local_public_key_path != nil do
+        Keys.read_public_key!(local_public_key_path)
+      else
+        # Fallback: derive from Ed25519 if available
+        ed25519_public_key_path = get_in(config, ["identity", "ed25519_public_key_path"])
+
+        if ed25519_public_key_path != nil do
+          Keys.read_public_key!(ed25519_public_key_path)
+        else
+          # Last resort: use hash of private key
+          :crypto.hash(:sha256, local_private_key <> "pubkey")
+        end
+      end
+
+    sender_node_id = Keys.node_id_from_public_key(local_public_key)
+
+    # Generate dialogue_id: hash of sorted sender+recipient node_ids
+    dialogue_id =
+      [sender_node_id, recipient_node_id]
+      |> Enum.sort()
+      |> IO.iodata_to_binary()
+      |> :crypto.hash(:sha256)
+      # Take first 16 bytes for dialogue_id
+      |> binary_part(0, 16)
+
+    # Get and increment sequence number for this dialogue
+    sequence_number =
+      case :ets.lookup(@odp_sequences_table, dialogue_id) do
+        [{^dialogue_id, current_seq}] ->
+          new_seq = current_seq + 1
+          :ets.update_element(@odp_sequences_table, dialogue_id, {2, new_seq})
+          new_seq
+
+        [] ->
+          :ets.insert(@odp_sequences_table, {dialogue_id, 0})
+          0
+      end
+
+    {dialogue_id, sequence_number}
+  end
+
 
   @spec shard_payload_size(map()) :: pos_integer()
   defp shard_payload_size(config) do
     total = get_in(config, ["network", "pulse_size_bytes"]) || 1024
+    # Ensure total is an integer (YAML might parse it as string)
+    total = if is_binary(total), do: String.to_integer(total), else: total
     overhead = 128
     max(total - overhead, 1)
   end
@@ -292,11 +366,14 @@ defmodule ChronoMesh.ClientActions do
           %{instruction: :forward, node_id: next_peer.node_id}
         end
 
-      {token, shared} =
-        Token.encrypt_token(instruction, peer_info.public_key, frame_id, shard_index)
+      case Token.encrypt_token(instruction, peer_info.public_key, frame_id, shard_index) do
+        {:ok, {token, shared}} ->
+          new_acc = if idx == last_index, do: shared, else: acc
+          {token, new_acc}
 
-      new_acc = if idx == last_index, do: shared, else: acc
-      {token, new_acc}
+        {:error, reason} ->
+          raise "Failed to encrypt token: #{inspect(reason)}"
+      end
     end)
   end
 
@@ -370,28 +447,37 @@ defmodule ChronoMesh.ClientActions do
   @spec fec_parity_ratio(map()) :: float()
   defp fec_parity_ratio(config) do
     case get_in(config, ["fec", "parity_ratio"]) do
-      ratio when is_float(ratio) and ratio > 0.0 -> ratio
-      ratio when is_integer(ratio) and ratio > 0 -> ratio / 1.0
+      ratio when is_float(ratio) and ratio > 0.0 ->
+        ratio
+
+      ratio when is_integer(ratio) and ratio > 0 ->
+        ratio / 1.0
+
       ratio when is_binary(ratio) ->
         case Float.parse(ratio) do
           {float, _} when float > 0.0 -> float
           _ -> 0.25
         end
-      _ -> 0.25
+
+      _ ->
+        0.25
     end
   end
 
   @spec fec_min_parity_shards(map()) :: pos_integer()
   defp fec_min_parity_shards(config) do
     case get_in(config, ["fec", "min_parity_shards"]) do
-      min when is_integer(min) and min > 0 -> min
+      min when is_integer(min) and min > 0 ->
+        min
+
       min when is_binary(min) ->
         case Integer.parse(min) do
           {int, _} when int > 0 -> int
           _ -> 1
         end
-      _ -> 1
+
+      _ ->
+        1
     end
   end
-
 end

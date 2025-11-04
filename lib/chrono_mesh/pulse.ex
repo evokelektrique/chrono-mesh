@@ -16,7 +16,10 @@ defmodule ChronoMesh.Pulse do
     :auth_tag,
     fec_enabled: false,
     parity_count: 0,
-    data_shard_count: 0
+    data_shard_count: 0,
+    sequence_number: nil,
+    dialogue_id: nil,
+    privacy_tier: nil
   ]
 
   @type t :: %__MODULE__{
@@ -28,6 +31,9 @@ defmodule ChronoMesh.Pulse do
           auth_tag: binary(),
           fec_enabled: boolean(),
           parity_count: non_neg_integer(),
-          data_shard_count: pos_integer()
+          data_shard_count: pos_integer(),
+          sequence_number: non_neg_integer() | nil,
+          dialogue_id: binary() | nil,
+          privacy_tier: String.t() | nil
         }
 end

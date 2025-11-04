@@ -19,6 +19,9 @@ defmodule ChronoMesh.Node do
   alias ChronoMesh.Token, as: Token
   alias ChronoMesh.Keys, as: Keys
   alias ChronoMesh.FDP, as: FDP
+  alias ChronoMesh.PDQ, as: PDQ
+  alias ChronoMesh.ODP, as: ODP
+  alias ChronoMesh.Config, as: Config
 
   @type state :: %{
           wave_duration: pos_integer(),
@@ -29,7 +32,10 @@ defmodule ChronoMesh.Node do
           local_address: String.t(),
           private_key: binary(),
           ed25519_private_key: binary(),
+          local_node_id: binary(),
           fdp_pid: pid() | nil,
+          pdq_pid: pid() | nil,
+          odp_pid: pid() | nil,
           active_paths: %{optional(binary()) => [binary()]}
         }
 
@@ -73,7 +79,7 @@ defmodule ChronoMesh.Node do
 
     # Start control server, handle already_started case
     control_server_result =
-      case ChronoMesh.ControlServer.start_link(port: listen_port) do
+      case ChronoMesh.ControlServer.start_link(port: listen_port, config: config) do
         {:ok, _control_pid} -> :ok
         {:error, {:already_started, _pid}} -> :ok
         {:error, reason} -> {:stop, reason}
@@ -90,6 +96,74 @@ defmodule ChronoMesh.Node do
       ]
 
       {:ok, fdp_pid} = FDP.start_link(fdp_opts)
+
+      # Start PDQ process if enabled
+      pdq_pid =
+        if Config.pdq_enabled?(config) do
+          pdq_opts = [
+            disk_path: Config.pdq_disk_path(config),
+            encryption_enabled: Config.pdq_encryption_enabled?(config),
+            encryption_key:
+              get_in(config, ["identity", "ed25519_private_key_path"])
+              |> Keys.read_private_key!(),
+            cleanup_interval_ms: Config.pdq_cleanup_interval_ms(config)
+          ]
+
+          case PDQ.start_link(pdq_opts) do
+            {:ok, pid} ->
+              # Recover pending waves from disk on startup
+              case PDQ.recover_all_waves() do
+                {:ok, recovered_waves} when is_map(recovered_waves) ->
+                  wave_count = map_size(recovered_waves)
+                  Logger.info("PDQ: Recovered #{wave_count} waves from disk")
+
+                # Waves will be loaded on-demand during wave_tick
+
+                {:ok, _} ->
+                  Logger.info("PDQ: No waves to recover from disk")
+
+                {:error, reason} ->
+                  Logger.warning("PDQ: Failed to recover waves: #{inspect(reason)}")
+              end
+
+              pid
+
+            {:error, reason} ->
+              Logger.error("Failed to start PDQ: #{inspect(reason)}")
+              nil
+          end
+        else
+          nil
+        end
+
+      # Start ODP process if enabled
+      odp_pid =
+        if Config.odp_enabled?(config) do
+          # Create delivery callback that stores payload
+          delivery_callback = fn dialogue_id, sequence_number, frame_data ->
+            # Store the delivered frame (in-order)
+            store_payload_for_odp(frame_data, dialogue_id, sequence_number)
+          end
+
+          odp_opts = [
+            max_buffer_size: Config.odp_max_buffer_size(config),
+            sequence_timeout_ms: Config.odp_sequence_timeout_ms(config),
+            max_sequence_gap: Config.odp_max_sequence_gap(config),
+            delivery_callback: delivery_callback
+          ]
+
+          case ODP.start_link(odp_opts) do
+            {:ok, pid} ->
+              Logger.debug("ODP: Started with buffer size #{Config.odp_max_buffer_size(config)}")
+              pid
+
+            {:error, reason} ->
+              Logger.error("Failed to start ODP: #{inspect(reason)}")
+              nil
+          end
+        else
+          nil
+        end
 
       Logger.info("Node started with wave duration #{wave_duration}s")
       schedule_wave(wave_duration)
@@ -113,6 +187,27 @@ defmodule ChronoMesh.Node do
         raise ArgumentError, "ed25519_private_key must be a 32-byte binary"
       end
 
+      # Derive Ed25519 public key and node_id for ODP
+      ed25519_public_key =
+        case get_in(config, ["identity", "ed25519_public_key_path"]) do
+          nil ->
+            # Fallback: derive from X25519 public key if available
+            case get_in(config, ["identity", "public_key_path"]) do
+              nil ->
+                # Last resort: derive node_id from Ed25519 private key hash
+                # (this is a temporary workaround until config includes public key)
+                :crypto.hash(:sha256, ed25519_private_key <> "ed25519_pubkey")
+
+              x25519_public_key_path ->
+                Keys.read_public_key!(x25519_public_key_path)
+            end
+
+          ed25519_public_key_path ->
+            Keys.read_public_key!(ed25519_public_key_path)
+        end
+
+      local_node_id = Keys.node_id_from_public_key(ed25519_public_key)
+
       {:ok,
        %{
          wave_duration: wave_duration,
@@ -123,7 +218,10 @@ defmodule ChronoMesh.Node do
          local_address: local_address,
          private_key: private_key,
          ed25519_private_key: ed25519_private_key,
+         local_node_id: local_node_id,
          fdp_pid: fdp_pid,
+         pdq_pid: pdq_pid,
+         odp_pid: odp_pid,
          active_paths: %{}
        }}
     end
@@ -139,22 +237,124 @@ defmodule ChronoMesh.Node do
         {:noreply, updated_state}
 
       {:ok, {:forward, node_id, updated_pulse}} ->
-        next_wave = current_wave(state.wave_duration) + 1
-        entry = {updated_pulse, node_id}
-        updated_map = Map.update(state.pulses, next_wave, [entry], &[entry | &1])
+        # Check trust policy before relaying
+        trust_enabled = Config.trust_policy_enabled?(state.config)
 
-        # Track active path for failure detection
-        frame_id = updated_pulse.frame_id
-        current_path = Map.get(state.active_paths, frame_id, [])
-        updated_paths =
-          if node_id not in current_path do
-            Map.put(state.active_paths, frame_id, current_path ++ [node_id])
+        should_relay =
+          if trust_enabled do
+            module_name =
+              get_in(state.config, ["trust_policy", "module"]) || "ChronoMesh.TrustPolicy.Default"
+
+            module =
+              try do
+                String.to_existing_atom("Elixir." <> module_name)
+              rescue
+                ArgumentError ->
+                  case Code.string_to_quoted(module_name) do
+                    {:ok, {:__aliases__, _, parts}} ->
+                      Module.concat([Elixir | parts])
+
+                    _ ->
+                      nil
+                  end
+              end
+
+            if module != nil and Code.ensure_loaded?(module) and
+                 function_exported?(module, :should_relay?, 2) do
+              module.should_relay?(node_id, updated_pulse)
+            else
+              # Fallback to default trust policy
+              ChronoMesh.TrustPolicy.should_relay?(node_id, updated_pulse)
+            end
           else
-            state.active_paths
+            # Trust policy disabled, allow relay
+            true
           end
 
-        ChronoMesh.Events.emit(:pulse_enqueued, %{count: 1}, %{pulse: updated_pulse})
-        {:noreply, %{state | pulses: updated_map, active_paths: updated_paths}}
+        if not should_relay do
+          Logger.debug("Trust policy: Rejecting relay to node_id #{Base.encode16(node_id)}")
+
+          ChronoMesh.Events.emit(:pulse_rejected, %{reason: :trust_policy}, %{
+            pulse: updated_pulse
+          })
+
+          {:noreply, state}
+        else
+          # Calculate target wave based on privacy tier if present
+          base_wave = current_wave(state.wave_duration)
+
+          wave_multiplier =
+            if updated_pulse.privacy_tier != nil do
+              Config.privacy_tier_multiplier(state.config, updated_pulse.privacy_tier)
+            else
+              1
+            end
+
+          next_wave = base_wave + wave_multiplier
+          entry = {updated_pulse, node_id}
+
+          # Check if we should swap to disk (PDQ)
+          updated_state =
+            if state.pdq_pid != nil do
+              # Check if wave is far-future or memory threshold exceeded
+              current_wave_id = current_wave(state.wave_duration)
+              far_future_threshold = Config.pdq_far_future_threshold_waves(state.config)
+              is_far_future = next_wave > current_wave_id + far_future_threshold
+
+              should_swap =
+                is_far_future or
+                  memory_usage_exceeds_threshold?(state.pulses, state.config)
+
+              if should_swap do
+                # Check if wave already exists in memory (need to merge)
+                existing_pulses = Map.get(state.pulses, next_wave, [])
+                all_pulses = [entry | existing_pulses]
+
+                # Swap entire wave to disk
+                case PDQ.write_wave(next_wave, all_pulses, []) do
+                  :ok ->
+                    Logger.debug(
+                      "PDQ: Swapped wave #{next_wave} to disk (#{length(all_pulses)} pulses, #{if is_far_future, do: "far-future", else: "memory-threshold"})"
+                    )
+
+                    # Remove from memory pool since it's on disk
+                    updated_map = Map.delete(state.pulses, next_wave)
+                    %{state | pulses: updated_map}
+
+                  {:error, reason} ->
+                    Logger.warning(
+                      "PDQ: Failed to swap wave #{next_wave} to disk: #{inspect(reason)}, keeping in memory"
+                    )
+
+                    # Fallback to memory if disk write fails
+                    updated_map = Map.update(state.pulses, next_wave, [entry], &[entry | &1])
+                    %{state | pulses: updated_map}
+                end
+              else
+                # Keep in memory
+                updated_map = Map.update(state.pulses, next_wave, [entry], &[entry | &1])
+                %{state | pulses: updated_map}
+              end
+            else
+              # PDQ disabled, keep in memory
+              updated_map = Map.update(state.pulses, next_wave, [entry], &[entry | &1])
+              %{state | pulses: updated_map}
+            end
+
+          # Track active path for failure detection
+          frame_id = updated_pulse.frame_id
+          current_path = Map.get(updated_state.active_paths, frame_id, [])
+
+          updated_paths =
+            if node_id not in current_path do
+              Map.put(updated_state.active_paths, frame_id, current_path ++ [node_id])
+            else
+              updated_state.active_paths
+            end
+
+          ChronoMesh.Events.emit(:pulse_enqueued, %{count: 1}, %{pulse: updated_pulse})
+          {:noreply, %{updated_state | active_paths: updated_paths}}
+        end
 
       {:error, reason} ->
         Logger.error("Dropping pulse due to #{inspect(reason)}")
@@ -169,10 +369,36 @@ defmodule ChronoMesh.Node do
     wave = current_wave(state.wave_duration)
     {batch, pulses} = Map.pop(state.pulses, wave, [])
 
-    if batch != [] do
-      Logger.debug("Dispatching #{length(batch)} pulses for wave #{wave}")
+    # Load pulses from disk if PDQ is enabled
+    disk_batch =
+      if state.pdq_pid != nil do
+        case PDQ.load_wave(wave) do
+          {:ok, disk_pulses} when is_list(disk_pulses) and length(disk_pulses) > 0 ->
+            Logger.debug("PDQ: Loaded #{length(disk_pulses)} pulses from disk for wave #{wave}")
+            # Delete wave from disk after loading
+            PDQ.delete_wave(wave)
+            disk_pulses
 
-      batch
+          {:ok, []} ->
+            []
+
+          {:error, reason} ->
+            Logger.warning("PDQ: Failed to load wave #{wave} from disk: #{inspect(reason)}")
+            []
+        end
+      else
+        []
+      end
+
+    # Merge memory and disk batches
+    combined_batch = batch ++ disk_batch
+
+    if combined_batch != [] do
+      Logger.debug(
+        "Dispatching #{length(combined_batch)} pulses for wave #{wave} (#{length(batch)} from memory, #{length(disk_batch)} from disk)"
+      )
+
+      combined_batch
       |> Enum.shuffle()
       |> Enum.each(fn {pulse, node_id} -> forward_pulse(pulse, node_id, state) end)
     else
@@ -203,7 +429,9 @@ defmodule ChronoMesh.Node do
         {:noreply, state}
 
       {:error, reason} ->
-        Logger.error("Giving up forwarding to node_id #{Base.encode16(node_id)}: #{inspect(reason)}")
+        Logger.error(
+          "Giving up forwarding to node_id #{Base.encode16(node_id)}: #{inspect(reason)}"
+        )
 
         # Detect path failure after max retries
         path = Map.get(state.active_paths, pulse.frame_id, [])
@@ -237,7 +465,10 @@ defmodule ChronoMesh.Node do
 
   @spec forward_pulse(Pulse.t(), binary(), state()) :: :ok
   defp forward_pulse(%Pulse{} = pulse, node_id, state) do
-    Logger.debug("Forwarding pulse (#{byte_size(pulse.payload)} bytes) to node_id #{Base.encode16(node_id)}")
+    Logger.debug(
+      "Forwarding pulse (#{byte_size(pulse.payload)} bytes) to node_id #{Base.encode16(node_id)}"
+    )
+
     ChronoMesh.Events.emit(:pulse_forwarded, %{}, %{pulse: pulse})
 
     case ChronoMesh.ControlClient.enqueue_remote(node_id, [pulse]) do
@@ -366,16 +597,60 @@ defmodule ChronoMesh.Node do
 
     case decrypt_result do
       {:ok, plaintext} ->
+        # Check if this is an ODP frame (has dialogue_id and sequence_number)
+        is_odp_frame = pulse.dialogue_id != nil and pulse.sequence_number != nil
+
         # Route through FDP for frame reassembly if multi-shard
         # Remove from active paths on successful delivery
         updated_paths = Map.delete(state.active_paths, pulse.frame_id)
 
         if pulse.shard_count == 1 do
-          # Single shard - store immediately, no reassembly needed
-          store_payload(state, plaintext)
+          # Single shard
+          if is_odp_frame and state.odp_pid != nil do
+            # Route to ODP for ordered delivery
+            # Extract sender_id from token chain (first token's node_id)
+            sender_id =
+              case pulse.token_chain do
+                # Fallback if no tokens
+                [] -> <<0::256>>
+                _ -> extract_sender_id_from_path(state.active_paths, pulse.frame_id)
+              end
 
-          ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(plaintext)}, %{pulse: pulse})
-          %{state | active_paths: updated_paths}
+            # Get local node_id (recipient)
+            recipient_id = state.local_node_id
+
+            case ODP.register_frame(
+                   pulse.dialogue_id,
+                   pulse.sequence_number,
+                   plaintext,
+                   sender_id,
+                   recipient_id
+                 ) do
+              {:ok, :delivered} ->
+                Logger.debug("ODP: Frame delivered immediately (seq #{pulse.sequence_number})")
+
+                ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(plaintext)}, %{
+                  pulse: pulse
+                })
+
+              {:ok, :buffered} ->
+                Logger.debug("ODP: Frame buffered (seq #{pulse.sequence_number})")
+
+              {:error, reason} ->
+                Logger.warning("ODP: Failed to register frame: #{inspect(reason)}")
+            end
+
+            %{state | active_paths: updated_paths}
+          else
+            # Single shard - store immediately, no reassembly needed
+            store_payload(state, plaintext)
+
+            ChronoMesh.Events.emit(:pulse_delivered, %{bytes: byte_size(plaintext)}, %{
+              pulse: pulse
+            })
+
+            %{state | active_paths: updated_paths}
+          end
         else
           # Multi-shard - route through FDP
           # Pass FEC metadata if available
@@ -393,23 +668,65 @@ defmodule ChronoMesh.Node do
                  fec_opts
                ) do
             {:ok, :complete} ->
-              # Frame is complete - reassemble and store
+              # Frame is complete - reassemble
               case FDP.reassemble(pulse.frame_id) do
                 {:ok, reassembled} ->
-                  store_payload(state, reassembled)
+                  if is_odp_frame and state.odp_pid != nil do
+                    # Route to ODP for ordered delivery
+                    sender_id = extract_sender_id_from_path(state.active_paths, pulse.frame_id)
+                    recipient_id = state.local_node_id
 
-                  ChronoMesh.Events.emit(
-                    :pulse_delivered,
-                    %{
-                      bytes: byte_size(reassembled),
-                      frame_id: pulse.frame_id,
-                      shard_count: pulse.shard_count
-                    },
-                    %{pulse: pulse}
-                  )
+                    case ODP.register_frame(
+                           pulse.dialogue_id,
+                           pulse.sequence_number,
+                           reassembled,
+                           sender_id,
+                           recipient_id
+                         ) do
+                      {:ok, :delivered} ->
+                        Logger.debug(
+                          "ODP: Reassembled frame delivered (seq #{pulse.sequence_number})"
+                        )
 
-                  # Return updated state with cleaned paths
-                  %{state | active_paths: updated_paths}
+                        ChronoMesh.Events.emit(
+                          :pulse_delivered,
+                          %{
+                            bytes: byte_size(reassembled),
+                            frame_id: pulse.frame_id,
+                            shard_count: pulse.shard_count
+                          },
+                          %{pulse: pulse}
+                        )
+
+                      {:ok, :buffered} ->
+                        Logger.debug(
+                          "ODP: Reassembled frame buffered (seq #{pulse.sequence_number})"
+                        )
+
+                      {:error, reason} ->
+                        Logger.warning(
+                          "ODP: Failed to register reassembled frame: #{inspect(reason)}"
+                        )
+                    end
+
+                    %{state | active_paths: updated_paths}
+                  else
+                    # Store directly (not ODP frame)
+                    store_payload(state, reassembled)
+
+                    ChronoMesh.Events.emit(
+                      :pulse_delivered,
+                      %{
+                        bytes: byte_size(reassembled),
+                        frame_id: pulse.frame_id,
+                        shard_count: pulse.shard_count
+                      },
+                      %{pulse: pulse}
+                    )
+
+                    # Return updated state with cleaned paths
+                    %{state | active_paths: updated_paths}
+                  end
 
                 {:error, reason} ->
                   Logger.error(
@@ -517,6 +834,72 @@ defmodule ChronoMesh.Node do
 
       _ ->
         10 * 1024 * 1024
+    end
+  end
+
+  # PDQ memory management helpers
+
+  @spec memory_usage_exceeds_threshold?(map(), map()) :: boolean()
+  defp memory_usage_exceeds_threshold?(pulses_map, config) do
+    memory_capacity = Config.pdq_memory_capacity_bytes(config)
+    swap_threshold = Config.pdq_memory_swap_threshold(config)
+    threshold_bytes = trunc(memory_capacity * swap_threshold)
+
+    current_usage = calculate_memory_usage(pulses_map)
+    exceeds = current_usage >= threshold_bytes
+
+    if exceeds do
+      Logger.debug(
+        "PDQ: Memory usage #{current_usage} bytes exceeds threshold #{threshold_bytes} bytes"
+      )
+    end
+
+    exceeds
+  end
+
+  @spec calculate_memory_usage(map()) :: non_neg_integer()
+  defp calculate_memory_usage(pulses_map) do
+    # Calculate approximate memory usage by serializing pulses
+    pulses_map
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.reduce(0, fn {pulse, _node_id}, acc ->
+      # Approximate size: pulse struct + payload + token_chain
+      # Overhead for struct and metadata
+      pulse_size =
+        byte_size(pulse.payload) +
+          Enum.reduce(pulse.token_chain, 0, fn token, sum -> sum + byte_size(token) end) +
+          byte_size(pulse.frame_id) +
+          byte_size(pulse.auth_tag) +
+          100
+
+      acc + pulse_size
+    end)
+  end
+
+  # ODP helpers
+
+  defp store_payload_for_odp(frame_data, dialogue_id, sequence_number) do
+    # Store the in-order frame (called by ODP when ready)
+    path = inbox_path()
+    :ok = File.mkdir_p(Path.dirname(path))
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+    message = frame_data |> IO.iodata_to_binary() |> String.trim_trailing()
+    dialogue_hex = Base.encode16(dialogue_id)
+    line = "#{timestamp} [ODP seq:#{sequence_number} dialogue:#{dialogue_hex}] :: #{message}"
+    File.write(path, line <> "\n", [:append])
+
+    Logger.info(
+      "Stored ODP frame (seq #{sequence_number}, #{byte_size(frame_data)} bytes) -> #{path}"
+    )
+  end
+
+  defp extract_sender_id_from_path(active_paths, frame_id) do
+    # Extract sender (first node in path) from active_paths
+    case Map.get(active_paths, frame_id) do
+      [sender_id | _] -> sender_id
+      # Fallback
+      _ -> <<0::256>>
     end
   end
 end
